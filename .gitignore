@@ -1,0 +1,18 @@
+# виртуальное окружение и кэш Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# результаты сборки PyInstaller (exe собирается build_exe.bat)
+build/
+dist/
+*.exe
+*.zip
+
+# служебное
+.claude/
+*.log
+*.corrupt-*
+.DS_Store
+Thumbs.db
