@@ -248,16 +248,32 @@ _UI = {
         "en": "Character's dynamic memory"},
     "dyn_hint": {
         "ru": "Персонаж запоминает самое важное между диалогами (только собеседник, не герой). "
-              "Приложение само обновляет память по ходу диалога: кратко выделяет важные события, "
-              "изменения отношений, статуса, внешности. Опирается на память диалога "
-              "(в Settings «Размер истории» больше 0). Предел размера (в Settings) — дальше "
-              "память не растёт. Текст можно править руками. «Очистить» применится после «Сохранить».",
+              "Приложение само обновляет память по ходу диалога, держа пять разделов: изменения "
+              "отношений, внешности, характера, важные события и недавние события. Опирается на "
+              "память диалога (в Settings «Размер истории» больше 0). Предел размера (в Settings) — "
+              "дальше память не растёт. Текст можно править руками (заголовки «### ...» разделов "
+              "лучше сохранять). «Очистить» и промпт применятся после «Сохранить».",
         "en": "The character remembers what matters between dialogues (companions only, not the hero). "
-              "The app updates it during the dialogue: briefly picks out important events, "
-              "changes in relationships, status, appearance. Relies on the dialogue memory "
-              "(Settings “History size” above 0). The size limit (in Settings) — it never grows "
-              "beyond. You can edit the text by hand. “Clear” takes effect after “Save”."},
+              "The app updates it during the dialogue, keeping five sections: relationship, "
+              "appearance and personality changes, key events and recent events. Relies on the "
+              "dialogue memory (Settings “History size” above 0). The size limit (in Settings) — "
+              "it never grows beyond. You can edit the text by hand (better keep the “### ...” "
+              "section headings). “Clear” and the prompt take effect after “Save”."},
     "dyn_clear": {"ru": "Очистить динамическую память", "en": "Clear dynamic memory"},
+    "dyn_prompt_btn": {"ru": "Промпт динамической памяти…", "en": "Dynamic memory prompt…"},
+    "dyn_prompt_dlg_title": {"ru": "Промпт динамической памяти персонажа",
+                             "en": "Character dynamic memory prompt"},
+    "dyn_prompt_dlg_help": {
+        "ru": "Правила, по которым модель ведёт динамическую память ЭТОГО персонажа "
+              "(какие разделы и что в них записывать, насколько кратко). Формат ответа "
+              "(JSON с пятью разделами) добавляется автоматически и здесь не правится. "
+              "{limit} подставится предел размера. «Сбросить к стандартному» — вернуть "
+              "встроенные правила. Применится после «Сохранить» в форме персонажа.",
+        "en": "The rules by which the model keeps THIS character's dynamic memory (which "
+              "sections, what to put in them, how brief). The answer format (JSON with "
+              "five sections) is added automatically and is not edited here. {limit} is "
+              "replaced by the size limit. “Reset to default” brings back the built-in "
+              "rules. Applied after “Save” in the character form."},
     "log_dyn_request": {"ru": "ЗАПРОС (динамическая память: {name}) -> {model}",
                         "en": "REQUEST (dynamic memory: {name}) -> {model}"},
     "log_dyn_response": {"ru": "ОТВЕТ (динамическая память: {name}) <- {model}",
@@ -862,9 +878,9 @@ _INF_HELP_EN = {
     "dyn_memory_limit":
         "Maximum size of a character's dynamic memory (the checkbox in the "
         "character's “Manage” form). The memory never grows beyond it: the model "
-        "is told to fit in, and the app cuts any excess itself (oldest items "
-        "first). A larger limit — the character remembers more, but the memory "
-        "takes more context on every reply. Empty — 4000, allowed 500 to 20000.",
+        "is told to fit in, and the app cuts any excess itself (the oldest "
+        "items of the largest section). A larger limit — the character remembers more, but the memory "
+        "takes more context on every reply. Empty — 8000, allowed 500 to 30000.",
 }
 
 

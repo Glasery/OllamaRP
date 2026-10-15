@@ -2380,15 +2380,21 @@ class App(ctk.CTk):
             return "skip"
         self.token_queue.put("__DYN_BUILDING__")
         prot = self.active.get("protagonist")
+        lang = i18n.get_lang()
         msgs = dynamic_memory.build_messages(
             char.name, getattr(prot, "name", "") or "", char.dyn_memory,
-            list(self.dyn_new), limit=self._dyn_limit, lang=i18n.get_lang())
+            list(self.dyn_new), limit=self._dyn_limit, lang=lang,
+            rules=getattr(char, "dyn_prompt", ""))
+        # ответ - JSON по схеме (structured outputs): пять разделов гарантированы
+        # форматом; num_predict с запасом под предел размера (+ служебный JSON)
         text = self._run_hidden(
-            model, msgs, self._mem_opts(options, 2000), keep_alive,
+            model, msgs, self._mem_opts(options, int(self._dyn_limit / 1.5) + 600),
+            keep_alive,
             t("log_dyn_request", name=char.name or "?", model=model),
-            t("log_dyn_response", name=char.name or "?", model=model))
+            t("log_dyn_response", name=char.name or "?", model=model),
+            response_format=dynamic_memory.DYN_SCHEMA)
         status, new = dynamic_memory.interpret_reply(
-            text, char.dyn_memory, self._dyn_limit)
+            text, char.dyn_memory, self._dyn_limit, lang)
         name = char.name or "?"
         if status == "changed":
             char.dyn_memory = new
@@ -3725,7 +3731,7 @@ class App(ctk.CTk):
         return o
 
     def _run_hidden(self, model, msgs, options, keep_alive, req_title, resp_title,
-                    stop_event=None, on_tick=None):
+                    stop_event=None, on_tick=None, response_format=None):
         """Один скрытый запрос к модели (память / сжатие). -> текст (str, м.б.
         пустой) либо None при сетевой ошибке. Из фонового потока. <think>
         гасится. `on_tick(nchars, thinking)` - пинги прогресса по мере
@@ -3734,7 +3740,9 @@ class App(ctk.CTk):
         self.log_queue.put(self._fmt_log_entry(
             req_title,
             json.dumps({"model": model, "messages": msgs, "options": options,
-                        "think": think}, ensure_ascii=False, indent=2)))
+                        "think": think,
+                        **({"format": response_format} if response_format else {})},
+                       ensure_ascii=False, indent=2)))
         parts = []
         thinking = [0]
 
@@ -3746,7 +3754,8 @@ class App(ctk.CTk):
         try:
             for ch in chat_stream(model, msgs, options=options, think=think,
                                   keep_alive=keep_alive, stop_event=stop_event,
-                                  on_thinking=_on_think):
+                                  on_thinking=_on_think,
+                                  response_format=response_format):
                 parts.append(ch)
                 if on_tick:
                     on_tick(sum(len(p) for p in parts), thinking[0])

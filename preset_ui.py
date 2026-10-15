@@ -19,6 +19,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+import dynamic_memory
 import i18n
 import photos
 from i18n import t
@@ -289,6 +290,7 @@ class PresetEditDialog(_ModalToplevel):
         if self.spec.get("dynamic_memory"):
             values["dyn_enabled"] = bool(self._dyn_var.get())
             values["dyn_memory"] = self._dyn_text_to_save()
+            values["dyn_prompt"] = self._dyn_prompt
         if self.spec.get("photo") and self._store is not None:
             values["photo"] = self._photo_name
             values["gallery"] = list(self._gallery.names)
@@ -317,10 +319,32 @@ class PresetEditDialog(_ModalToplevel):
         if self._dyn_initial:
             self._dyn_box.insert("1.0", self._dyn_initial)
         self._dyn_box.pack(fill="x", pady=(PAD_TIGHT, 0))
-        ctk.CTkButton(frame, text=t("dyn_clear"), width=220, fg_color="#8a3a3a",
+        # СВОИ правила обновления памяти этого персонажа ("" = стандартные)
+        self._dyn_prompt = (getattr(obj, "dyn_prompt", "") or "") if obj is not None else ""
+        row = ctk.CTkFrame(frame, fg_color="transparent")
+        row.pack(fill="x", pady=(PAD_TIGHT, PAD))
+        ctk.CTkButton(row, text=t("dyn_clear"), width=MEDIA_BTN_W + 20, fg_color="#8a3a3a",
                       hover_color="#a34a4a",
-                      command=lambda: self._dyn_box.delete("1.0", "end")).pack(
-            anchor="w", pady=(PAD_TIGHT, PAD))
+                      command=lambda: self._dyn_box.delete("1.0", "end")).pack(side="left")
+        ctk.CTkButton(row, text=t("dyn_prompt_btn"), width=MEDIA_BTN_W + 20, fg_color="gray30",
+                      hover_color="gray40", command=self._edit_dyn_prompt).pack(
+            side="left", padx=(PAD_TIGHT, 0))
+
+    def _edit_dyn_prompt(self):
+        """Правка правил динамической памяти ЭТОГО персонажа (как «Промпт
+        памяти» в панели памяти). Дефолт - под язык интерфейса; совпало со
+        встроенным (любого языка) или пусто -> хранится "" (= стандартные,
+        переключаются вместе с языком)."""
+        default = dynamic_memory.default_rules(i18n.get_lang())
+        dlg = TextEditDialog(self, t("dyn_prompt_dlg_title"),
+                             self._dyn_prompt.strip() or default, default_text=default,
+                             help_text=t("dyn_prompt_dlg_help"))
+        self.wait_window(dlg)
+        self._grab()                   # окно правки сняло grab - вернуть его форме
+        if dlg.result is None:
+            return
+        new = dlg.result.strip()
+        self._dyn_prompt = "" if (not new or new in dynamic_memory.builtin_rules()) else new
 
     def _dyn_text_to_save(self) -> str:
         """Текст динамической памяти для сохранения. Приложение обновляет её
@@ -337,7 +361,9 @@ class PresetEditDialog(_ModalToplevel):
                 fresh = None
             if fresh is not None:
                 return getattr(fresh, "dyn_memory", "") or ""
-        return text
+        # правка руками: приводим к каноническому виду (разделы + лимит), чтобы
+        # структура не терялась; пусто остаётся пустым
+        return dynamic_memory.normalize_text(text, i18n.get_lang()) if text else ""
 
     # --- фото (необязательное) ---------------------------------------------
     def _build_photo_row(self, frame):

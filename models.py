@@ -57,6 +57,8 @@ class Character:
     # Фото в промпт модели НЕ попадают.
     dyn_enabled: bool = False    # ДИНАМИЧЕСКАЯ ПАМЯТЬ включена (только у собеседника;
                                   # см. dynamic_memory.py)
+    dyn_prompt: str = ""         # СВОИ правила для модели, обновляющей эту память ("" -> стандартные,
+                                  # см. dynamic_memory.DYN_RULES); формат ответа добавляется всегда
     dyn_memory: str = ""         # её текст: самое важное, что с персонажем случилось;
                                   # подставляется в его блок промпта, обновляется приложением
 
@@ -70,6 +72,7 @@ class Character:
         kwargs = {k: _s(d.get(k)) for k in keys}
         kwargs["id"] = _id(d.get("id"))
         kwargs["dyn_enabled"] = d.get("dyn_enabled") is True
+        kwargs["dyn_prompt"] = _s(d.get("dyn_prompt"))
         kwargs["dyn_memory"] = _s(d.get("dyn_memory")) if isinstance(d.get("dyn_memory"), str) else ""
         kwargs["gallery"] = _str_list(d.get("gallery"))
         kwargs["emotes"] = _str_list(d.get("emotes"))

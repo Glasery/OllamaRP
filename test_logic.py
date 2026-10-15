@@ -1363,78 +1363,6 @@ def test_dynamic_memory_field_and_prompt():
     assert "Динамическая память" not in prompt(empty)
 
 
-def test_dynamic_memory_logic():
-    """dynamic_memory: промпт (лимит, имена, события, оба языка), разбор ответа
-    (НЕТ_ИЗМЕНЕНИЙ / пусто / код-блок / идентично), жёсткий предел размера
-    (режутся самые старые строки), защита от «усыхания» памяти."""
-    import dynamic_memory as dm
-    m = dm.build_messages("Ксана", "Виктар", "- старое", ["сводка 1", "сводка 2"], limit=1234)
-    assert m[0]["role"] == "system" and "1234" in m[0]["content"] and dm.NO_CHANGES in m[0]["content"]
-    u = m[1]["content"]
-    assert "Ксана" in u and "Виктар" in u and "- старое" in u and "сводка 1" in u and "сводка 2" in u
-    assert "(пусто)" in dm.build_messages("К", "", "", ["e"])[1]["content"]
-    en = dm.build_messages("Xana", "Vic", "", ["e"], lang="en")
-    assert dm.NO_CHANGES_EN in en[0]["content"] and "(empty)" in en[1]["content"]
-    many = dm.build_messages("К", "", "", [f"событие-{i}" for i in range(30)])[1]["content"]
-    assert "событие-29" in many and "событие-0\n" not in many          # вход ограничен
-
-    cur = "- a\n- b"
-    assert dm.interpret_reply("НЕТ_ИЗМЕНЕНИЙ", cur) == ("same", cur)
-    assert dm.interpret_reply("  no changes. ", cur) == ("same", cur)
-    assert dm.interpret_reply("", cur) == ("fail", cur) and dm.interpret_reply(None, cur) == ("fail", cur)
-    assert dm.interpret_reply("- a\n- b", cur) == ("same", cur)       # идентично
-    assert dm.interpret_reply("```\n- a\n- b\n- c\n```", cur) == ("changed", "- a\n- b\n- c")
-    assert dm.interpret_reply("- a\n- b\n- c", cur) == ("changed", "- a\n- b\n- c")
-
-    # предел размера: лишнее режется с НАЧАЛА (старое), результат <= limit
-    text = "\n".join(f"- пункт {i:03d} " + "слово " * 10 for i in range(100))
-    fit = dm.fit_to_limit(text, 500)
-    assert len(fit) <= 500 and "пункт 099" in fit and "пункт 000" not in fit
-    assert dm.fit_to_limit("короткий", 500) == "короткий"
-    one = dm.fit_to_limit("слово " * 200, 100)                        # одна длинная строка
-    assert len(one) <= 100 and one.endswith("…")
-    st, new = dm.interpret_reply(text, "- x", limit=500)
-    assert st == "changed" and len(new) <= 500
-    # память не вырастает выше предела даже на «раздутом» ответе
-    st, new = dm.interpret_reply("- " + "я" * 9000, "- x")
-    assert len(new) <= dm.DYN_MEMORY_LIMIT
-
-    # защита: из длинной (но не у предела) памяти не должно «усыхать» до огрызка
-    big = "- " + "важное " * 150                                    # ~1000 символов
-    assert dm.interpret_reply("- ок", big) == ("same", big.strip())
-    # а у самого предела сжатие ожидаемо и принимается
-    near = "\n".join(f"- {i} " + "x" * 30 for i in range(110))
-    assert len(near) > dm.DYN_MEMORY_LIMIT * 0.9
-    st, _new = dm.interpret_reply("- кратко", near)
-    assert st == "changed"
-
-
-def test_dyn_memory_limit_setting():
-    """Settings: dyn_memory_limit - предел динамической памяти. Дефолт 4000,
-    пусто/мусор/bool/старый settings.json -> 4000, значения зажимаются в
-    500..20000, round-trip, в options для Ollama не идёт; предел реально
-    применяется (fit_to_limit / interpret_reply / текст промпта)."""
-    import dynamic_memory as dm
-    assert InferenceConfig().dyn_limit() == 4000
-    assert InferenceConfig.from_dict({}).dyn_limit() == 4000
-    for bad in ("x", True, None, [], {}):
-        assert InferenceConfig.from_dict({"dyn_memory_limit": bad}).dyn_limit() == 4000, bad
-    assert InferenceConfig.from_dict({"dyn_memory_limit": 1500}).dyn_limit() == 1500
-    assert InferenceConfig.from_dict({"dyn_memory_limit": 10}).dyn_limit() == dm.DYN_LIMIT_MIN
-    assert InferenceConfig.from_dict({"dyn_memory_limit": 10**9}).dyn_limit() == dm.DYN_LIMIT_MAX
-    assert InferenceConfig(dyn_memory_limit=None).dyn_limit() == 4000     # пустое поле в UI
-    c = InferenceConfig(dyn_memory_limit=2500)
-    assert InferenceConfig.from_dict(c.to_dict()).dyn_limit() == 2500
-    assert "dyn_memory_limit" not in c.to_options()
-    assert InferenceConfig.optimal().dyn_limit() == 4000
-    assert any(f["attr"] == "dyn_memory_limit" and f["kind"] == "int" for f in INFERENCE_FIELDS)
-    # предел действительно применяется
-    text = "\n".join(f"- пункт {i:03d} " + "слово " * 10 for i in range(100))
-    st, new = dm.interpret_reply(text, "- x", limit=1000)
-    assert st == "changed" and len(new) <= 1000 and "пункт 099" in new
-    assert "1000" in dm.build_messages("К", "", "", ["e"], limit=1000)[0]["content"]
-
-
 def test_session_snapshot_normalize_and_storage_resilience():
     """normalize_snapshot: любой мусор -> снимок с гарантированными типами,
     индексы зажаты в [0, len(history)], нет исключений. Хранилище пресетов и
@@ -1490,16 +1418,6 @@ def test_session_snapshot_normalize_and_storage_resilience():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_dynamic_memory_marker_variants():
-    """НЕТ_ИЗМЕНЕНИЙ: маркер первой строкой = «без изменений» (пояснение после
-    него - не память); маркер среди текста в память не попадает."""
-    import dynamic_memory as dm
-    assert dm.interpret_reply("НЕТ_ИЗМЕНЕНИЙ.\nНо Ксана теперь замужем.", "- a") == ("same", "- a")
-    assert dm.interpret_reply("No changes", "- a") == ("same", "- a")
-    st, new = dm.interpret_reply("- a\n- b\nНЕТ_ИЗМЕНЕНИЙ", "- a")
-    assert st == "changed" and "НЕТ_ИЗМЕНЕНИЙ" not in new and new == "- a\n- b"
-
-
 def test_parse_structured_reply_truncated_json():
     """Оборванный JSON (обрыв связи, обрезка по num_predict) разбирается
     терпимо: берём успевшее прийти вместо сырого обрубка в чате/истории.
@@ -1548,6 +1466,149 @@ def test_default_seed_presets_ru_and_en():
             if isinstance(v, str):
                 assert not cyr.search(v), (block, k)
         assert any(isinstance(v, str) and len(v) > 20 for v in en.to_dict().values()), block   # не заглушка
+
+
+def test_dynamic_memory_logic():
+    """dynamic_memory: пять разделов (разбор/сборка текста без потерь, старый
+    «плоский» список -> «Важные события»), промпт (правила + фиксированный
+    формат, предел, имена, оба языка, свои правила), разбор JSON-ответа
+    (changed/same/fail, маркер, текстовый запасной вариант), предел размера и
+    защита от «усыхания»."""
+    import json as _json
+    import dynamic_memory as dm
+    assert dm.SECTIONS == ("relationships", "appearance", "personality", "key_events", "recent_events")
+    assert set(dm.DYN_SCHEMA["properties"]) == {"important_changes", *dm.SECTIONS}
+    assert dm.DYN_SCHEMA["required"][0] == "important_changes"       # сначала решение, потом разделы
+
+    # разбор/сборка
+    legacy = "- Ксана и Виктар поцеловались\n- Теперь доверяет"
+    assert dm.parse_text(legacy)["key_events"] == ["Ксана и Виктар поцеловались", "Теперь доверяет"]
+    secs = {"relationships": ["Доверяет Виктару"], "key_events": ["Поцелуй"], "recent_events": ["a", "b"]}
+    txt = dm.render(secs)
+    assert "### Изменения отношений\n- Доверяет Виктару" in txt and "Изменения внешности" not in txt
+    back = dm.parse_text(txt)
+    assert back["relationships"] == ["Доверяет Виктару"] and back["recent_events"] == ["a", "b"]
+    assert dm.render(dm.parse_text(txt)) == txt                        # идемпотентно
+    assert dm.parse_text("Relationship changes:\n* x\n1) y")["relationships"] == ["x", "y"]   # EN, маркеры
+    assert dm.render(secs, "en").startswith("### Relationship changes")
+    assert dm.normalize_text(legacy).startswith("### Важные события") and dm.normalize_text("") == ""
+
+    # промпт
+    m = dm.build_messages("Ксана", "Виктар", legacy, ["сводка 1", "сводка 2"], limit=1234)
+    sysm, user = m[0]["content"], m[1]["content"]
+    assert "1234" in sysm and "important_changes" in sysm and "recent_events" in sysm
+    assert "Ксана" in user and "Виктар" in user and "сводка 1" in user and "сводка 2" in user
+    assert "Ксана и Виктар поцеловались" in user                      # текущая память - JSON по разделам
+    custom = dm.build_messages("К", "", "", ["e"], rules="МОИ ПРАВИЛА до {limit}", limit=777)
+    assert custom[0]["content"].startswith("МОИ ПРАВИЛА до 777") and "important_changes" in custom[0]["content"]
+    en = dm.build_messages("X", "Y", "", ["e"], lang="en")
+    assert "Updated dynamic memory" in en[1]["content"] and "Answer format" in en[0]["content"]
+    many = dm.build_messages("К", "", "", [f"событие-{i}" for i in range(30)])[1]["content"]
+    assert "событие-29" in many and "событие-0\n" not in many         # вход ограничен
+    assert dm.default_rules("ru") in dm.builtin_rules() and dm.default_rules("en") in dm.builtin_rules()
+
+    def reply(**kw):
+        d = {"important_changes": True, **{k: [] for k in dm.SECTIONS}}
+        d.update(kw)
+        return _json.dumps(d, ensure_ascii=False)
+
+    cur = "### Важные события\n- старое"
+    st, new = dm.interpret_reply(reply(key_events=["старое", "новое"], relationships=["Сблизились"]), cur)
+    assert st == "changed" and "### Изменения отношений\n- Сблизились" in new and "- новое" in new
+    assert dm.interpret_reply(reply(important_changes=False), cur) == ("same", cur)
+    assert dm.interpret_reply(reply(key_events=["старое"]), cur) == ("same", cur)    # ничего не изменилось
+    assert dm.interpret_reply("```json\n" + reply(key_events=["старое", "б"]) + "\n```", cur)[0] == "changed"
+    assert dm.interpret_reply('{"important_changes": true, "relationships": [', cur) == ("fail", cur)   # обрезан
+    assert dm.interpret_reply("", cur) == ("fail", cur) and dm.interpret_reply(None, cur) == ("fail", cur)
+    assert dm.interpret_reply('{"foo": 1}', cur) == ("fail", cur)
+    assert dm.interpret_reply(reply(), cur) == ("same", cur)                         # всё пусто - память не стираем
+    assert dm.interpret_reply("НЕТ_ИЗМЕНЕНИЙ", cur) == ("same", cur)
+    assert dm.interpret_reply("no changes.", cur) == ("same", cur)
+    # раздел строкой вместо списка и числа в пунктах не ломают разбор
+    st, new = dm.interpret_reply('{"important_changes": true, "key_events": "а\\nб", "recent_events": [1, true, "в"]}', "")
+    assert st == "changed" and "- а" in new and "- б" in new and "- 1" in new and "true" not in new
+    # модель ответила текстом с заголовками / плоским списком
+    st, new = dm.interpret_reply("### Важные события\n- а\n- б", cur)
+    assert st == "changed" and "- а" in new
+    st, new = dm.interpret_reply("- просто\n- список", "")
+    assert st == "changed" and new.startswith("### Важные события")
+
+    # структура не теряется при многократном обновлении и ручной правке
+    state = ""
+    for i in range(30):
+        st, state2 = dm.interpret_reply(reply(key_events=[f"событие {i}"], recent_events=[f"недавнее {i}"],
+                                              relationships=["отношение"]), state)
+        state = state2 if st == "changed" else state
+        assert state.count("### ") <= 5
+    assert "### Изменения отношений" in state and "### Недавние события" in state
+    assert dm.normalize_text("просто мой текст без заголовков") == "### Важные события\n- просто мой текст без заголовков"
+
+    # предел размера и «Недавние»
+    big = {k: [f"пункт {i:03d} " + "слово " * 8 for i in range(60)] for k in dm.SECTIONS}
+    fit = dm.fit_sections(big, 2000)
+    out = dm.render(fit)
+    assert len(out) <= 2000 and len(fit["recent_events"]) <= dm.RECENT_MAX_ITEMS
+    assert all(fit[k] for k in dm.SECTIONS)                           # ни один раздел не обнулён целиком
+    assert "пункт 059" in out and "пункт 000" not in out              # режутся самые старые
+    one = dm.fit_sections({"key_events": ["слово " * 400]}, 300)
+    assert len(dm.render(one)) <= 300
+    st, new = dm.interpret_reply(reply(**big), "", limit=1500)
+    assert st == "changed" and len(new) <= 1500
+    st, new = dm.interpret_reply(reply(key_events=["я" * 20000]), "")
+    assert len(new) <= dm.DYN_MEMORY_LIMIT
+
+    # защита: из длинной (но не у предела) памяти не должно «усыхать» до огрызка
+    long_cur = dm.render({"key_events": [f"важное событие номер {i} " + "х" * 20 for i in range(30)]})
+    assert 600 < len(long_cur) < dm.DYN_MEMORY_LIMIT * 0.9
+    assert dm.interpret_reply(reply(key_events=["ок"]), long_cur) == ("same", long_cur)
+    # а у самого предела сжатие ожидаемо и принимается
+    near = dm.render({"key_events": [f"{i} " + "x" * 30 for i in range(260)]}, "ru")
+    st, _n = dm.interpret_reply(reply(key_events=["кратко"]), near, limit=len(near) + 10)
+    assert st == "changed"
+
+
+def test_dyn_memory_limit_setting():
+    """Settings: dyn_memory_limit - предел динамической памяти. Дефолт 8000,
+    пусто/мусор/bool/старый settings.json -> 8000, прежний дефолт 4000 читается
+    как новый, значения зажимаются в 500..30000, round-trip, в options для
+    Ollama не идёт; предел реально применяется."""
+    import dynamic_memory as dm
+    assert InferenceConfig().dyn_limit() == 8000 == dm.DYN_MEMORY_LIMIT
+    assert InferenceConfig.from_dict({}).dyn_limit() == 8000
+    for bad in ("x", True, None, [], {}):
+        assert InferenceConfig.from_dict({"dyn_memory_limit": bad}).dyn_limit() == 8000, bad
+    assert InferenceConfig.from_dict({"dyn_memory_limit": 4000}).dyn_limit() == 8000      # прежний дефолт
+    assert InferenceConfig.from_dict({"dyn_memory_limit": 1500}).dyn_limit() == 1500
+    assert InferenceConfig.from_dict({"dyn_memory_limit": 10}).dyn_limit() == dm.DYN_LIMIT_MIN
+    assert InferenceConfig.from_dict({"dyn_memory_limit": 10**9}).dyn_limit() == dm.DYN_LIMIT_MAX == 30000
+    assert InferenceConfig(dyn_memory_limit=None).dyn_limit() == 8000                     # пустое поле в UI
+    c = InferenceConfig(dyn_memory_limit=2500)
+    assert InferenceConfig.from_dict(c.to_dict()).dyn_limit() == 2500
+    assert "dyn_memory_limit" not in c.to_options()
+    assert InferenceConfig.optimal().dyn_limit() == 8000
+    assert any(f["attr"] == "dyn_memory_limit" and f["kind"] == "int" for f in INFERENCE_FIELDS)
+    # предел действительно применяется
+    reply = '{"important_changes": true, "key_events": [%s]}' % ",".join(
+        '"пункт %03d %s"' % (i, "слово " * 10) for i in range(100))
+    st, new = dm.interpret_reply(reply, "", limit=1000)
+    assert st == "changed" and len(new) <= 1000 and "пункт 099" in new
+    assert "1000" in dm.build_messages("К", "", "", ["e"], limit=1000)[0]["content"]
+
+
+def test_dynamic_memory_marker_variants():
+    """Запасной текстовый маркер НЕТ_ИЗМЕНЕНИЙ (если модель не держит JSON):
+    первой строкой = «без изменений» (пояснение после него - не память);
+    маркер среди текста памяти в неё не попадает. Свои правила (dyn_prompt)
+    персонажа переживают round-trip."""
+    import dynamic_memory as dm
+    assert dm.interpret_reply("НЕТ_ИЗМЕНЕНИЙ.\nНо Ксана теперь замужем.", "- a") == ("same", "- a")
+    assert dm.interpret_reply("No changes", "- a") == ("same", "- a")
+    st, new = dm.interpret_reply("- a\n- b\nНЕТ_ИЗМЕНЕНИЙ", "- a")
+    assert st == "changed" and "НЕТ_ИЗМЕНЕНИЙ" not in new and "- b" in new
+    c = Character(name="К", dyn_enabled=True, dyn_prompt="Следи только за отношениями")
+    assert Character.from_dict(c.to_dict()).dyn_prompt == "Следи только за отношениями"
+    assert Character.from_dict({"id": "x"}).dyn_prompt == ""
+    assert Character.from_dict({"id": "x", "dyn_prompt": 5}).dyn_prompt == "5"
 
 
 def test_stall_timeout_config():

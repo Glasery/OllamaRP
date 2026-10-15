@@ -894,21 +894,44 @@ Ollama. Нативное окно на CustomTkinter (обычный Tkinter п�
     `test_session_store_roundtrip_and_robustness`. Идея на потом:
     автосохранение при выходе / «продолжить последний» при старте.
 - **Динамическая память персонажа-собеседника.** `Character.dyn_enabled`
-  (bool, дефолт False) и `dyn_memory` (str) - в самом пресете (`from_dict`:
-  не-bool/не-str -> дефолт; `BLOCK_SPECS["character"]["dynamic_memory"]=True`
+  (bool, дефолт False), `dyn_memory` (str) и `dyn_prompt` (str, СВОИ правила
+  обновления памяти этого персонажа, "" = стандартные) - в самом пресете
+  (`from_dict`: не-bool/не-str -> дефолт; `BLOCK_SPECS["character"]["dynamic_memory"]=True`
   включает секцию формы, у героя её нет). Включается галкой в форме персонажа
   (НЕ в Settings).
-  - `dynamic_memory.py` (чистая логика): `build_messages(char, protagonist,
-    current, new_events, limit, lang)` (RU/EN; в системном промпте лимит и
-    маркер `НЕТ_ИЗМЕНЕНИЙ`/`NO_CHANGES`), `interpret_reply(reply, current)` ->
-    `("fail"|"same"|"changed", text)`, `fit_to_limit` (при переполнении
-    выбрасываются самые СТАРЫЕ строки, одна длинная строка - по границе слова
-    с «…»). Предел - настройка `InferenceConfig.dyn_memory_limit` (Settings, int;
-    `dyn_limit()`: пусто/мусор/bool -> дефолт `DYN_MEMORY_LIMIT=4000`, иначе
-    зажим в `DYN_LIMIT_MIN..MAX` = 500..20000 через `clamp_limit`; не в
-    `options`); из UI-потока кладётся в `App._dyn_limit` при `_on_send` и
+  - **Структура (v2).** Память = пять разделов `SECTIONS`: relationships /
+    appearance / personality / key_events / recent_events. Раньше модель
+    переписывала свободный текст и за 800+ реплик структура терялась. Теперь:
+    запрос идёт со `structured outputs` (`response_format=DYN_SCHEMA`, свойство
+    `important_changes` ПЕРВЫМ - модель сначала решает, есть ли что писать), а в
+    пресете хранится канонический текст с заголовками `### <Раздел>` (RU/EN, по
+    языку интерфейса; парсер понимает любые). При КАЖДОМ обновлении код делает
+    `parse_text` -> слияние -> `fit_sections` -> `render`: структура не
+    «уплывает» даже после ручной правки/старой версии (строки до первого
+    заголовка, «плоский» список = `key_events`). Форма при «Сохранить»
+    нормализует текст (`normalize_text`). `recent_events` режутся до
+    `RECENT_MAX_ITEMS=6`.
+  - **Промпт.** `build_messages(..., rules="")`: system = ПРАВИЛА (редактируемые,
+    `DYN_RULES`/`DYN_RULES_EN`, подстановки `{limit}` и `{recent}`; своё -
+    `Character.dyn_prompt`) + ФИКСИРОВАННЫЙ формат ответа (`_FORMAT_SPEC`,
+    добавляется всегда). Текущая память уходит в user-сообщении как JSON по
+    разделам. Правка - кнопка «Промпт динамической памяти…» в форме персонажа
+    (`TextEditDialog`, как «Промпт памяти»; после него `_grab()` возвращает
+    modal-grab форме); совпало со встроенным -> хранится "".
+  - `interpret_reply(reply, current, limit, lang)` -> `("fail"|"same"|"changed",
+    text)`: JSON-объект (`important_changes=false` -> same; нет ни одного
+    раздела / обрезанный JSON -> fail; раздел строкой, числа в пунктах
+    терпятся), запасные пути: маркер `НЕТ_ИЗМЕНЕНИЙ`/`NO_CHANGES`, ответ
+    текстом с заголовками или плоским списком. `fit_sections`: при
+    переполнении у самого ОБЪЁМНОГО раздела отбрасывается самый старый пункт
+    (ни один раздел целиком не обнуляется), единственный пункт режется по слову
+    с «…». Предел - настройка `InferenceConfig.dyn_memory_limit` (Settings, int;
+    `dyn_limit()`: пусто/мусор/bool -> дефолт `DYN_MEMORY_LIMIT=8000` (был 4000; сохранённое
+    значение 4000 читается как новый дефолт - `OLD_DEFAULT_LIMIT`), иначе зажим
+    в `DYN_LIMIT_MIN..MAX` = 500..30000 через `clamp_limit`; не в `options`); из UI-потока кладётся в `App._dyn_limit` при `_on_send` и
     `_dyn_flush_start` (воркер к виджетам не обращается) и идёт и в промпт
-    запроса, и в `interpret_reply`. Остальные константы: `DYN_NEW_MAX_ITEMS=8`,
+    запроса, и в `interpret_reply`; `num_predict` скрытого запроса =
+    `limit / 1.5 + 600`. `_run_hidden(..., response_format=)` передаёт схему. Остальные константы: `DYN_NEW_MAX_ITEMS=8`,
     защита от «усыхания» (`SHRINK_GUARD_*`: новый текст < 40 % от текущего,
     когда текущий > 600 символов и < 90 % лимита, считается испорченным
     ответом -> "same"). "fail" (пусто/ошибка сети) - события остаются на
