@@ -1611,6 +1611,200 @@ def test_dynamic_memory_marker_variants():
     assert Character.from_dict({"id": "x", "dyn_prompt": 5}).dyn_prompt == "5"
 
 
+def test_think_timeout_config():
+    """Settings: think_timeout - секунды «размышляет» до перезапроса. Дефолт 90,
+    пусто/мусор/bool/старый settings.json -> 90, 0 и меньше -> выкл, round-trip,
+    в options для Ollama не идёт, поле есть в Settings."""
+    assert InferenceConfig().think_seconds() == 90
+    assert InferenceConfig.from_dict({}).think_seconds() == 90               # старый settings.json
+    assert InferenceConfig.from_dict({"think_timeout": 45}).think_seconds() == 45
+    assert InferenceConfig.from_dict({"think_timeout": 0}).think_seconds() == 0
+    assert InferenceConfig.from_dict({"think_timeout": -5}).think_seconds() == 0
+    for bad in ("x", True, None, [], {}):
+        assert InferenceConfig.from_dict({"think_timeout": bad}).think_seconds() == 90, bad
+    assert InferenceConfig(think_timeout=None).think_seconds() == 90         # пустое поле в UI
+    c = InferenceConfig(think_timeout=30)
+    assert InferenceConfig.from_dict(c.to_dict()).think_seconds() == 30
+    assert "think_timeout" not in c.to_options()
+    assert InferenceConfig.optimal().think_seconds() == 90
+    assert any(f["attr"] == "think_timeout" and f["kind"] == "int" for f in INFERENCE_FIELDS)
+
+
+def test_chat_stream_think_timeout_real_socket():
+    """chat_stream(think_timeout): размышления идут НЕПРЕРЫВНО (stall_timeout тут
+    молчит), но ответ не начинается дольше лимита -> OllamaThinkTimeoutError;
+    ответ, начавшийся вовремя, лимитом не задевается (даже если потом идёт
+    долго); inline <think> считается так же; think_timeout=0 - не следить."""
+    import json as _json, time as _time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import ollama_client as oc
+
+    mode = {"kind": "think_forever"}
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+
+            def chunk(obj):
+                b = (_json.dumps(obj) + "\n").encode()
+                self.wfile.write(f"{len(b):x}\r\n".encode() + b + b"\r\n")
+                self.wfile.flush()
+            k = mode["kind"]
+            try:
+                if k == "think_forever":                  # непрерывные размышления без ответа
+                    for _ in range(80):
+                        chunk({"message": {"thinking": "hmm "}, "done": False})
+                        _time.sleep(0.05)
+                elif k == "inline_forever":               # то же, но <think> прямо в content
+                    chunk({"message": {"content": "<think>"}, "done": False})
+                    for _ in range(80):
+                        chunk({"message": {"content": "hmm "}, "done": False})
+                        _time.sleep(0.05)
+                elif k == "think_then_answer":            # размышления вовремя, потом ответ
+                    for _ in range(4):
+                        chunk({"message": {"thinking": "hmm "}, "done": False})
+                        _time.sleep(0.05)
+                    chunk({"message": {"content": "ok"}, "done": False})
+                elif k == "answer_long":                  # ответ пошёл сразу и идёт дольше лимита
+                    chunk({"message": {"thinking": "t"}, "done": False})
+                    chunk({"message": {"content": "a"}, "done": False})
+                    for _ in range(30):
+                        chunk({"message": {"content": "b"}, "done": False})
+                        _time.sleep(0.05)
+                chunk({"message": {"content": ""}, "done": True})
+                self.wfile.write(b"0\r\n\r\n")
+            except OSError:
+                pass                                       # клиент оборвал - так и задумано
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    old_url = oc.OLLAMA_URL
+    oc.OLLAMA_URL = f"http://127.0.0.1:{srv.server_address[1]}"
+    msgs = [{"role": "user", "content": "x"}]
+    try:
+        # 1) бесконечные размышления -> ловим по лимиту, а не по концу потока (4 с)
+        seen = []
+        t0 = _time.time()
+        try:
+            list(oc.chat_stream("m", msgs, on_thinking=seen.append, stall_timeout=2.0, think_timeout=0.6))
+            raise AssertionError("непрерывные размышления без ответа должны дать OllamaThinkTimeoutError")
+        except oc.OllamaThinkTimeoutError as e:
+            assert isinstance(e, OllamaError) and not isinstance(e, OllamaStallError)
+            assert _time.time() - t0 < 2.5, "сорвалось не по лимиту размышлений"
+        assert len(seen) >= 2                                   # размышления до обрыва дошли
+        # без on_thinking лимит тоже работает
+        try:
+            list(oc.chat_stream("m", msgs, think_timeout=0.6))
+            raise AssertionError("без on_thinking лимит тоже должен срабатывать")
+        except oc.OllamaThinkTimeoutError:
+            pass
+
+        # 2) inline <think> в content
+        mode["kind"] = "inline_forever"
+        try:
+            list(oc.chat_stream("m", msgs, on_thinking=lambda s: None, think_timeout=0.6))
+            raise AssertionError("inline-размышления без ответа должны дать OllamaThinkTimeoutError")
+        except oc.OllamaThinkTimeoutError:
+            pass
+
+        # 3) размышления уложились - лимит не мешает
+        mode["kind"] = "think_then_answer"
+        assert list(oc.chat_stream("m", msgs, on_thinking=lambda s: None, think_timeout=2.0)) == ["ok"]
+
+        # 4) ответ начался вовремя и идёт дольше лимита - не задевается
+        mode["kind"] = "answer_long"
+        out = "".join(oc.chat_stream("m", msgs, on_thinking=lambda s: None, think_timeout=0.5))
+        assert out.startswith("ab") and len(out) > 20
+
+        # 5) 0 = не следить: дожидаемся конца потока
+        mode["kind"] = "think_forever"
+        list(oc.chat_stream("m", msgs, on_thinking=lambda s: None, think_timeout=0))
+    finally:
+        oc.OLLAMA_URL = old_url
+        srv.shutdown()
+
+
+def test_dynamic_memory_delta_mode():
+    """Дельта-режим динамической памяти (быстрый): память с номерами пунктов в
+    промпте, ответ - только изменения (новые пункты, список «Недавних»,
+    remove по номерам). Полная перезапись - только у предела (choose_mode).
+    Защита: нельзя удалить больше 30 % пунктов за раз, мусорные номера
+    игнорируются, текст вместо JSON - fail (не замена всей памяти)."""
+    import json as _json
+    import dynamic_memory as dm
+    assert dm.DYN_MIN_NEW == 2                                      # обновление вдвое реже
+    assert set(dm.DYN_DELTA_SCHEMA["properties"]) == {"important_changes", *dm.SECTIONS, "remove"}
+    assert dm.DYN_DELTA_SCHEMA["required"][0] == "important_changes"
+
+    cur = dm.render({"relationships": ["Доверяет Виктору"], "key_events": [f"событие {i}" for i in range(9)],
+                     "recent_events": ["пили чай"]})
+    # режим по заполненности
+    assert dm.choose_mode(cur, 8000) == "delta" and dm.choose_mode("", 8000) == "delta"
+    assert dm.choose_mode(cur, len(cur) + 10) == "full"             # почти у предела -> сжатие
+
+    # нумерация: сквозная, «Недавние» без номеров
+    text, ids = dm.numbered_text(dm.parse_text(cur))
+    assert "[1] Доверяет Виктору" in text and "[2] событие 0" in text and "- пили чай" in text
+    assert len(ids) == 10 and ids[1] == ("relationships", 0) and ids[2] == ("key_events", 0)
+
+    # промпт дельта-режима: номера в user, формат «ТОЛЬКО ИЗМЕНЕНИЯ» в system, меньше, чем full
+    d = dm.build_messages("К", "В", cur, ["сводка"], mode="delta")
+    f = dm.build_messages("К", "В", cur, ["сводка"], mode="full")
+    assert "[2] событие 0" in d[1]["content"] and "ТОЛЬКО ИЗМЕНЕНИЯ" in d[0]["content"]
+    assert "ПОЛНУЮ" in f[0]["content"] and "[2]" not in f[1]["content"]
+    assert len(d[1]["content"]) < len(f[1]["content"])             # компактнее JSON
+    en = dm.build_messages("X", "Y", cur, ["e"], lang="en", mode="delta")
+    assert "numbered items" in en[1]["content"] and "ONLY THE CHANGES" in en[0]["content"]
+
+    def reply(**kw):
+        o = {"important_changes": True, **{k: [] for k in dm.SECTIONS}, "remove": []}
+        o.update(kw)
+        return _json.dumps(o, ensure_ascii=False)
+
+    # добавление + удаление по номерам + замена «Недавних»
+    st, new = dm.interpret_reply(reply(key_events=["Признание"], relationships=["Влюбилась"],
+                                       recent_events=["гуляли"], remove=[2]), cur, mode="delta")
+    assert st == "changed"
+    assert "- Признание" in new and "- Влюбилась" in new and "- Доверяет Виктору" in new
+    assert "- событие 0" not in new and "- событие 1" in new         # удалён пункт №2
+    assert "- гуляли" in new and "пили чай" not in new
+    # no changes / ничего нового -> same
+    assert dm.interpret_reply(reply(important_changes=False), cur, mode="delta") == ("same", cur)
+    assert dm.interpret_reply(reply(recent_events=["пили чай"]), cur, mode="delta") == ("same", cur)
+    # защита от массового удаления и мусорных номеров
+    st, new = dm.interpret_reply(reply(remove=list(range(1, 11))), cur, mode="delta")
+    kept = dm.parse_text(new)
+    left = sum(len(v) for k, v in kept.items() if k != "recent_events") if st == "changed" else 10
+    assert left >= 7                                                 # не больше 30 % за раз
+    st, new = dm.interpret_reply(reply(remove=[99, -1, "x", True, None, 3.5]), cur, mode="delta")
+    assert st == "same"
+    assert dm.interpret_reply(reply(remove=["[2]", "3"], key_events=["z"]), cur, mode="delta")[0] == "changed"
+    # дельта пуста у пустой памяти -> первая запись
+    st, new = dm.interpret_reply(reply(key_events=["первое"]), "", mode="delta")
+    assert st == "changed" and new == "### Важные события\n- первое"
+    # текст вместо JSON в дельта-режиме НЕ заменяет всю память; сломанный JSON - fail
+    assert dm.interpret_reply("- просто\n- список", cur, mode="delta") == ("fail", cur)
+    assert dm.interpret_reply('{"important_changes": true, "key_events": [', cur, mode="delta") == ("fail", cur)
+    assert dm.interpret_reply('{"foo": 1}', cur, mode="delta") == ("fail", cur)
+    assert dm.interpret_reply("НЕТ_ИЗМЕНЕНИЙ", cur, mode="delta") == ("same", cur)
+    # предел соблюдается и в дельта-режиме
+    big = [f"пункт {i:03d} " + "слово " * 8 for i in range(80)]
+    st, new = dm.interpret_reply(reply(key_events=big), "", limit=1000, mode="delta")
+    assert st == "changed" and len(new) <= 1000
+    # legacy «плоская» память мигрирует и в дельта-режиме
+    st, new = dm.interpret_reply(reply(relationships=["Сблизились"]), "- старая запись", mode="delta")
+    assert st == "changed" and "### Важные события\n- старая запись" in new and "- Сблизились" in new
+
+
 def test_stall_timeout_config():
     """Settings: stall_timeout - секунды тишины модели до перезапроса.
     Дефолт 30, пустое поле/мусор/старый settings.json без ключа -> 30, 0 -> выкл,

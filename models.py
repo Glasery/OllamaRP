@@ -184,10 +184,13 @@ OPTIMAL_INFERENCE = {
     "structured_dialogue": True,   # раздельный вывод действие/речь через JSON
     "digest_window": 6,           # сколько последних ходов слать дословно
     "stall_timeout": 30,         # секунд тишины -> считаем, что модель зависла
+    "think_timeout": 90,         # секунд размышлений без начала ответа -> перезапрос
 }
 
 # Дефолт таймаута «модель замолчала» (секунды); 0 в настройках = выключено.
 STALL_TIMEOUT_DEFAULT = 30
+# Дефолт лимита времени «размышляет» (секунды до начала ответа); 0 = выключено.
+THINK_TIMEOUT_DEFAULT = 90
 
 # Режимы показа эмотиконов (кнопка вверху, по кругу): все / только собеседник /
 # скрыты. Порядок = порядок переключения.
@@ -225,6 +228,7 @@ class InferenceConfig:
     left_panel_hidden: bool = False     # UI: левая панель (Сцена/Settings) свёрнута
     ui_language: str = "ru"             # UI: язык интерфейса ("ru" / "en")
     stall_timeout: Optional[int] = STALL_TIMEOUT_DEFAULT  # сек тишины -> перезапрос; 0 -> выкл
+    think_timeout: Optional[int] = THINK_TIMEOUT_DEFAULT  # сек размышлений без ответа -> перезапрос; 0 -> выкл
     show_avatars: bool = True           # АВАТАРЫ: фото рядом с репликами в чате (диалог)
     show_gallery: bool = True           # ГАЛЕРЕЯ: вкладки «Фото» в боковых панелях (диалог)
     show_emotes: bool = False           # ЭМОТИКОНЫ поверх интерфейса (экспериментально, Windows)
@@ -251,6 +255,13 @@ class InferenceConfig:
         options для Ollama - поведение самого приложения."""
         return clamp_limit(self.dyn_memory_limit)
 
+    def think_seconds(self) -> int:
+        """Лимит времени «размышляет» в секундах: пустое поле (None) -> дефолт,
+        0 и меньше -> 0 (выключено). НЕ в options для Ollama (поведение
+        приложения, см. App._generate_worker)."""
+        v = self.think_timeout
+        return THINK_TIMEOUT_DEFAULT if v is None else max(0, int(v))
+
     def stall_seconds(self) -> int:
         """Таймаут «модель замолчала» в секундах: пустое поле (None) -> дефолт,
         0 и меньше -> 0 (выключено). НЕ входит в options для Ollama - это
@@ -271,6 +282,7 @@ class InferenceConfig:
         sd = d.get("structured_dialogue")
         # нет ключа (старый settings.json) / мусор / null -> дефолт, а не None
         st = d.get("stall_timeout")
+        tt = d.get("think_timeout")
         # Старые имена (до разделения фото на 3 вида): show_photos -> аватары,
         # photo_overlay -> эмотиконы. Нет ключа / мусор -> дефолт.
         sa = d.get("show_avatars", d.get("show_photos"))
@@ -299,6 +311,8 @@ class InferenceConfig:
             left_panel_hidden=bool(d.get("left_panel_hidden")),
             ui_language="en" if str(d.get("ui_language")).lower() == "en" else "ru",
             stall_timeout=st,
+            think_timeout=(int(tt) if isinstance(tt, (int, float)) and not isinstance(tt, bool)
+                           else THINK_TIMEOUT_DEFAULT),
             show_avatars=sa if isinstance(sa, bool) else True,
             show_gallery=sg if isinstance(sg, bool) else True,
             show_emotes=se if isinstance(se, bool) else False,

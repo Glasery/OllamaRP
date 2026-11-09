@@ -295,6 +295,10 @@ _UI = {
                       "en": "🔁 the text got stuck in a loop · regenerating {i}/{n}"},
     "st_retry_stall": {"ru": "⏱ модель молчит {s} с · повторный запрос {i}/{n}",
                        "en": "⏱ the model went silent for {s}s · resending {i}/{n}"},
+    "st_retry_think": {"ru": "🧠 размышления дольше {s} с · повторный запрос {i}/{n}",
+                       "en": "🧠 thinking for over {s}s · resending {i}/{n}"},
+    "st_retry_think_off": {"ru": "🧠 размышления дольше {s} с · повтор {i}/{n} без размышлений",
+                           "en": "🧠 thinking for over {s}s · resend {i}/{n} with thinking off"},
     "st_story_recap": {"ru": "📖 пересказываю историю кратко… {i}/{n}",
                        "en": "📖 summarizing the story so far… {i}/{n}"},
 
@@ -569,6 +573,20 @@ _UI = {
     "log_retry_stall": {
         "ru": "ЗАВИСАНИЕ МОДЕЛИ — тишина {s} с, повторный запрос {i}/{n}",
         "en": "MODEL STALLED — silent for {s}s, resending {i}/{n}"},
+    "log_retry_think": {
+        "ru": "ДОЛГИЕ РАЗМЫШЛЕНИЯ — ответ не начался за {s} с, повторный запрос {i}/{n}",
+        "en": "THINKING TOO LONG — no reply started within {s}s, resending {i}/{n}"},
+    "log_retry_think_off": {
+        "ru": " (размышления отключены для этой и следующих попыток)",
+        "en": " (thinking is switched off for this and the following attempts)"},
+    "log_retry_think_gaveup": {
+        "ru": "ДОЛГИЕ РАЗМЫШЛЕНИЯ — ЛИМИТ ПОВТОРНЫХ ЗАПРОСОВ ИСЧЕРПАН ({n}), ответ не получен",
+        "en": "THINKING TOO LONG — RESEND LIMIT REACHED ({n}), no reply received"},
+    "think_gaveup_err": {
+        "ru": "модель размышляет слишком долго: {n} повторных запросов подряд без ответа "
+              "(лимит {s} с, настраивается в Settings)",
+        "en": "the model thinks for too long: {n} resends in a row with no reply "
+              "(limit {s}s, set in Settings)"},
     "log_retry_stall_gaveup": {
         "ru": "ЗАВИСАНИЕ МОДЕЛИ — ЛИМИТ ПОВТОРНЫХ ЗАПРОСОВ ИСЧЕРПАН ({n}), ответ не получен",
         "en": "MODEL STALLED — RESEND LIMIT REACHED ({n}), no reply received"},
@@ -767,6 +785,7 @@ _INF_LABEL_EN = {
     "think": "Reasoning (model's thinking)",
     "keep_alive": "Keep the model in memory",
     "stall_timeout": "“Model is silent” timeout (sec)",
+    "think_timeout": "“Thinking” time limit (sec)",
     "dyn_memory_limit": "Character dynamic memory limit (characters)",
 }
 
@@ -875,6 +894,15 @@ _INF_HELP_EN = {
         "the very first token (model loading, long-prompt processing) does not "
         "count. Empty — 30 s, 0 — off. Every resend is visible in the "
         "generation status and in Logs (an upper-case heading).",
+    "think_timeout":
+        "If the model thinks for longer than this many seconds and still does not "
+        "start to answer (endless thinking, especially at the start of a new "
+        "dialogue), the request is aborted and sent again (up to 3 times, then an "
+        "error). From the second attempt, if the model supports it, thinking is "
+        "switched off entirely so that an answer is sure to come. It differs from "
+        "the “model is silent” timeout: this one counts the time while thinking "
+        "tokens ARE flowing but there is no answer yet. Empty — 90 s, 0 — off. "
+        "Every resend is visible in the generation status and in Logs.",
     "dyn_memory_limit":
         "Maximum size of a character's dynamic memory (the checkbox in the "
         "character's “Manage” form). The memory never grows beyond it: the model "

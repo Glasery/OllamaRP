@@ -43,6 +43,10 @@ DYN_LIMIT_MIN = 500            # допустимые границы настр�
 DYN_LIMIT_MAX = 30000
 OLD_DEFAULT_LIMIT = 4000       # прежний дефолт; в сохранённых настройках читается как новый
 DYN_NEW_MAX_ITEMS = 8          # сколько необработанных сводок держим (вход запроса ограничен)
+DYN_MIN_NEW = 2                # авто-обновление - когда накопилось не меньше стольких новых
+                               # сводок памяти диалога (т.е. в 2 раза реже, чем после каждой)
+REWRITE_AT = 0.8               # память заполнена на столько от предела -> полная перезапись (сжатие)
+MAX_REMOVE_RATIO = 0.3         # дельта-режим: за раз можно удалить не больше этой доли пунктов
 RECENT_MAX_ITEMS = 6           # «Недавние события» - не больше стольких пунктов
 SHRINK_GUARD_FROM = 600        # короче текущая память - защиту от «усыхания» не применяем
 SHRINK_GUARD_RATIO = 0.4       # новый текст < 40 % старого - подозрительно...
@@ -80,6 +84,19 @@ DYN_SCHEMA = {
 NO_CHANGES = "НЕТ_ИЗМЕНЕНИЙ"          # запасной текстовый маркер (если модель не держит JSON)
 _NO_CHANGES_RE = re.compile(
     r"^\W*(НЕТ[_\s-]*ИЗМЕНЕНИЙ|NO[_\s-]*CHANGES?)\W*$", re.IGNORECASE)
+
+# Схема ДЕЛЬТА-режима: раздел-список = НОВЫЕ пункты (кроме recent_events - он
+# заменяется целиком), remove = номера пунктов памяти, которые удалить.
+DYN_DELTA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "important_changes": {"type": "boolean"},
+        **{k: {"type": "array", "items": {"type": "string"}} for k in SECTIONS},
+        "remove": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["important_changes", *SECTIONS, "remove"],
+    "additionalProperties": False,
+}
 
 # ---- промпт: ПРАВИЛА (редактируются пользователем) + ФОРМАТ (фиксированный) ----
 DYN_RULES = (
@@ -138,6 +155,30 @@ _FORMAT_SPEC_EN = (
     "\"appearance\": [strings], \"personality\": [strings], \"key_events\": [strings], "
     "\"recent_events\": [strings]}. Always output the FULL updated memory (every "
     "section in full, not only the new items); an empty section is an empty list."
+)
+
+
+_FORMAT_SPEC_DELTA = (
+    "\n\nФормат ответа — ТОЛЬКО JSON-объект без пояснений и без markdown: "
+    "{\"important_changes\": true|false, \"relationships\": [строки], "
+    "\"appearance\": [строки], \"personality\": [строки], \"key_events\": [строки], "
+    "\"recent_events\": [строки], \"remove\": [числа]}. Выводи ТОЛЬКО ИЗМЕНЕНИЯ, "
+    "а не всю память: в relationships, appearance, personality и key_events — только "
+    "НОВЫЕ пункты (то, чего ещё нет в памяти); в recent_events — полный обновлённый "
+    "список недавних событий (пустой список — оставить как есть); в remove — номера [N] пунктов текущей памяти, которые "
+    "устарели, дублируются или перенесены в другой раздел (не удаляй важное). Пустой "
+    "список — ничего не добавлять/удалять."
+)
+_FORMAT_SPEC_DELTA_EN = (
+    "\n\nAnswer format — ONLY a JSON object with no explanations and no markdown: "
+    "{\"important_changes\": true|false, \"relationships\": [strings], "
+    "\"appearance\": [strings], \"personality\": [strings], \"key_events\": [strings], "
+    "\"recent_events\": [strings], \"remove\": [numbers]}. Output ONLY THE CHANGES, "
+    "not the whole memory: in relationships, appearance, personality and key_events "
+    "put only NEW items (things not in the memory yet); in recent_events the full "
+    "updated list of recent events (an empty list keeps them as they are); in remove the numbers [N] of current memory items "
+    "that are stale, duplicated or moved to another section (do not remove what "
+    "matters). An empty list means nothing to add/remove."
 )
 
 
@@ -260,35 +301,118 @@ def fit_sections(sections: dict, limit: int = DYN_MEMORY_LIMIT, lang: str = "ru"
 
 
 # ------------------------------------------------------------------- запрос ----
+# Два режима запроса (выбирает choose_mode):
+#   "delta" (обычный, БЫСТРЫЙ) - модель получает память с номерами пунктов и
+#       возвращает ТОЛЬКО изменения: новые пункты по разделам, новый список
+#       «Недавних» и номера устаревших пунктов (remove). Вывод - десятки-сотни
+#       токенов вместо переписывания всей памяти (раньше до ~3000 токенов на
+#       каждое обновление - именно это и было долго);
+#   "full" (редкий) - полная перезапись: когда память заполнена на
+#       REWRITE_AT от предела и её нужно СЖАТЬ (слить повторы, выбросить
+#       устаревшее) - дельта этого не умеет.
+def choose_mode(current: str, limit: int = DYN_MEMORY_LIMIT, lang: str = "ru") -> str:
+    """"full", если память почти заполнена (нужно сжатие), иначе "delta"."""
+    size = len(render(parse_text(current), lang))
+    return "full" if limit > 0 and size >= REWRITE_AT * limit else "delta"
+
+
+def numbered_text(sections: dict, lang: str = "ru"):
+    """Память для промпта дельта-режима: пункты всех разделов, КРОМЕ «Недавних»,
+    с КОРОТКИМИ сквозными номерами [1], [2]... (по ним модель указывает, что
+    удалить). «Недавние» не нумеруются - они заменяются списком целиком.
+    -> (текст, {номер: (раздел, индекс)})."""
+    titles = TITLES["en" if _is_en(lang) else "ru"]
+    ids, lines, n = {}, [], 0
+    for k in SECTIONS:
+        items = _dedupe((sections or {}).get(k) or [])
+        if not items:
+            continue
+        lines.append(f"{titles[k]}:")
+        for i, it in enumerate(items):
+            if k == "recent_events":
+                lines.append(f"- {it}")
+            else:
+                n += 1
+                ids[n] = (k, i)
+                lines.append(f"[{n}] {it}")
+    return "\n".join(lines), ids
+
+
 def build_messages(char_name: str, protagonist_name: str, current: str,
                    new_events: list, limit: int = DYN_MEMORY_LIMIT,
-                   lang: str = "ru", rules: str = "") -> list:
+                   lang: str = "ru", rules: str = "", mode: str = "full") -> list:
     """messages для скрытого запроса. `current` - текущий текст памяти (любой
     вид: разберётся parse_text); `new_events` - новые сводки памяти диалога
     (берётся не больше DYN_NEW_MAX_ITEMS последних). `rules` - свои правила
     (промпт персонажа); пусто -> стандартные. Формат ответа добавляется ВСЕГДА
-    и не редактируется."""
+    и не редактируется; зависит от `mode` ("delta" - только изменения, "full" -
+    вся память целиком)."""
     en = _is_en(lang)
+    delta = mode == "delta"
     events = "\n\n".join(e.strip() for e in (new_events or [])[-DYN_NEW_MAX_ITEMS:]
                          if e and e.strip())
     cur = parse_text(current)
-    cur_json = json.dumps({k: cur[k] for k in SECTIONS}, ensure_ascii=False, indent=1)
+    if delta:
+        cur_text, _ids = numbered_text(cur, lang)
+        spec = _FORMAT_SPEC_DELTA_EN if en else _FORMAT_SPEC_DELTA
+    else:
+        cur_text = json.dumps({k: cur[k] for k in SECTIONS}, ensure_ascii=False, indent=1)
+        spec = _FORMAT_SPEC_EN if en else _FORMAT_SPEC
     base = (rules or "").strip() or default_rules(lang)
     system = (base.replace("{limit}", str(limit)).replace("{recent}", str(RECENT_MAX_ITEMS))
-              + (_FORMAT_SPEC_EN if en else _FORMAT_SPEC))
+              + spec)
     if en:
         who = (f"Character: “{char_name or 'unnamed'}”."
                + (f" The protagonist (the player) is “{protagonist_name}”."
                   if protagonist_name else ""))
-        user = (f"{who}\n\nCurrent dynamic memory (JSON):\n{cur_json}\n\n"
-                f"New events of the dialogue:\n{events}\n\nUpdated dynamic memory (JSON):")
+        user = (f"{who}\n\nCurrent dynamic memory"
+                f"{' (numbered items)' if delta else ' (JSON)'}:\n{cur_text or '(empty)'}\n\n"
+                f"New events of the dialogue:\n{events}\n\n"
+                f"{'Changes (JSON):' if delta else 'Updated dynamic memory (JSON):'}")
     else:
         who = (f"Персонаж: «{char_name or 'без имени'}»."
                + (f" Главный герой (игрок): «{protagonist_name}»."
                   if protagonist_name else ""))
-        user = (f"{who}\n\nТекущая динамическая память (JSON):\n{cur_json}\n\n"
-                f"Новые события диалога:\n{events}\n\nОбновлённая динамическая память (JSON):")
+        user = (f"{who}\n\nТекущая динамическая память"
+                f"{' (пункты с номерами)' if delta else ' (JSON)'}:\n{cur_text or '(пусто)'}\n\n"
+                f"Новые события диалога:\n{events}\n\n"
+                f"{'Изменения (JSON):' if delta else 'Обновлённая динамическая память (JSON):'}")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def apply_delta(cur: dict, obj: dict, lang: str = "ru") -> dict:
+    """Применить ответ дельта-режима к текущей памяти (cur - разделы).
+    `remove` - номера из numbered_text (не больше MAX_REMOVE_RATIO пунктов за
+    раз: защита от модели, «стирающей» память); раздел-список = НОВЫЕ пункты,
+    добавляются в конец; `recent_events` заменяются списком целиком (пустой - без изменений)."""
+    secs = {k: list(_dedupe(cur.get(k) or [])) for k in SECTIONS}
+    _text, ids = numbered_text(secs, lang)
+    drop = set()
+    raw = obj.get("remove")
+    for x in (raw if isinstance(raw, list) else []):
+        if isinstance(x, str) and x.strip().lstrip("[").rstrip("]").isdigit():
+            x = int(x.strip().lstrip("[").rstrip("]"))
+        if isinstance(x, int) and not isinstance(x, bool) and x in ids:
+            drop.add(ids[x])
+    max_drop = max(1, int(len(ids) * MAX_REMOVE_RATIO))
+    if len(drop) > max_drop:                          # слишком много - игнорируем лишнее
+        drop = set(sorted(drop)[:max_drop])
+    for k in SECTIONS:
+        if k != "recent_events":
+            secs[k] = [it for i, it in enumerate(secs[k]) if (k, i) not in drop]
+    for k in SECTIONS:
+        v = obj.get(k)
+        if isinstance(v, str) and v.strip():
+            v = v.splitlines()
+        if not isinstance(v, list):
+            continue
+        items = [x for x in v if isinstance(x, (str, int, float)) and not isinstance(x, bool)]
+        if k == "recent_events":
+            if items:                                  # пустой список = «как было»
+                secs[k] = items
+        else:
+            secs[k] = secs[k] + items
+    return {k: _dedupe(v) for k, v in secs.items()}
 
 
 # ------------------------------------------------------------ разбор ответа ----
@@ -312,7 +436,8 @@ def _parse_json_object(text: str):
     return obj if isinstance(obj, dict) else None
 
 
-def interpret_reply(reply, current: str, limit: int = DYN_MEMORY_LIMIT, lang: str = "ru"):
+def interpret_reply(reply, current: str, limit: int = DYN_MEMORY_LIMIT, lang: str = "ru",
+                    mode: str = "full"):
     """Ответ модели -> (статус, текст):
         ("fail", current)    - пусто / нет разбираемого ответа (новые события
                                остаются необработанными - повторим позже);
@@ -320,7 +445,8 @@ def interpret_reply(reply, current: str, limit: int = DYN_MEMORY_LIMIT, lang: st
                                изменилось или подозрительный ответ: память не
                                меняем, события считаются обработанными;
         ("changed", новый)   - новая память: канонический текст с разделами,
-                               уже уложенный в limit."""
+                               уже уложенный в limit.
+    mode="delta" - ответ это ИЗМЕНЕНИЯ (apply_delta), "full" - вся память."""
     cur = (current or "").strip()
     if reply is None or not str(reply).strip():
         return "fail", cur
@@ -330,24 +456,32 @@ def interpret_reply(reply, current: str, limit: int = DYN_MEMORY_LIMIT, lang: st
     if _NO_CHANGES_RE.match(text.split("\n", 1)[0].strip()):
         return "same", cur
     obj = _parse_json_object(text)
+    delta = mode == "delta"
     if obj is not None:
         if obj.get("important_changes") is False:
             return "same", cur
-        secs = empty_sections()
-        found = False
-        for k in SECTIONS:
-            v = obj.get(k)
-            if isinstance(v, list):
-                found = True
-                secs[k] = [x for x in v if isinstance(x, (str, int, float))
-                           and not isinstance(x, bool)]
-            elif isinstance(v, str) and v.strip():       # раздел строкой вместо списка
-                found = True
-                secs[k] = v.splitlines()
-        if not found:
+        known = [k for k in (*SECTIONS, "remove") if k in obj]
+        if not known:
             return "fail", cur
-    elif text.lstrip().startswith(("{", "[")):
-        return "fail", cur                                # обрезанный/сломанный JSON
+        if delta:
+            secs = apply_delta(parse_text(cur), obj, lang)
+        else:
+            secs = empty_sections()
+            found = False
+            for k in SECTIONS:
+                v = obj.get(k)
+                if isinstance(v, list):
+                    found = True
+                    secs[k] = [x for x in v if isinstance(x, (str, int, float))
+                               and not isinstance(x, bool)]
+                elif isinstance(v, str) and v.strip():       # раздел строкой вместо списка
+                    found = True
+                    secs[k] = v.splitlines()
+            if not found:
+                return "fail", cur
+    elif delta or text.lstrip().startswith(("{", "[")):
+        return "fail", cur                                # обрезанный/сломанный JSON; в дельта-
+                                                          # режиме текст - не замена всей памяти
     else:                                                 # модель ответила текстом
         text = "\n".join(ln for ln in text.split("\n")
                          if not _NO_CHANGES_RE.match(ln.strip())).strip()
@@ -362,7 +496,8 @@ def interpret_reply(reply, current: str, limit: int = DYN_MEMORY_LIMIT, lang: st
     cur_norm = render(fit_sections(parse_text(cur), limit, lang), lang)
     if new == cur_norm:
         return "same", cur
-    if (len(cur_norm) > SHRINK_GUARD_FROM and len(cur_norm) < limit * SHRINK_GUARD_FULL
+    if (not delta and len(cur_norm) > SHRINK_GUARD_FROM
+            and len(cur_norm) < limit * SHRINK_GUARD_FULL
             and len(new) < len(cur_norm) * SHRINK_GUARD_RATIO):
         return "same", cur                                # память не должна «усыхать» без причины
     return "changed", new

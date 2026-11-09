@@ -9,6 +9,7 @@ import json
 import re
 import socket
 import threading
+import time
 from typing import Iterator, Optional
 
 import requests
@@ -18,6 +19,14 @@ OLLAMA_URL = "http://localhost:11434"
 
 class OllamaError(Exception):
     """Не удалось связаться с Ollama - обычно значит, что она не запущена."""
+    pass
+
+
+class OllamaThinkTimeoutError(OllamaError):
+    """Модель слишком долго РАЗМЫШЛЯЕТ: токены размышления идут (поэтому таймер
+    «молчания» не срабатывает), но ответ так и не начался за `think_timeout`
+    секунд - типичное «ушла в бесконечные размышления». Отдельный класс:
+    вызывающий перезапросит (при необходимости - с отключёнными размышлениями)."""
     pass
 
 
@@ -327,7 +336,8 @@ def chat_stream(model: str, messages: list, options: "Optional[dict]" = None,
                 stop_event: "Optional[threading.Event]" = None,
                 on_request=None, on_thinking=None,
                 response_format=None, strip_inline_think: bool = True,
-                stall_timeout: "Optional[float]" = None) -> Iterator[str]:
+                stall_timeout: "Optional[float]" = None,
+                think_timeout: "Optional[float]" = None) -> Iterator[str]:
     """
     Отправляет диалог в Ollama и построчно отдаёт кусочки ответа по мере
     их генерации (это генератор - используй в цикле `for chunk in ...`).
@@ -359,6 +369,11 @@ def chat_stream(model: str, messages: list, options: "Optional[dict]" = None,
                  загрузка модели и обработка длинного промпта до первого
                  токена сюда не входят; пока модель шлёт токены (в том числе
                  размышления), таймер не срабатывает.
+    think_timeout       - секунды, которые модель может РАЗМЫШЛЯТЬ (от первого
+                 токена размышления до первого токена ответа): дольше ->
+                 OllamaThinkTimeoutError (None/0 - не следить). Ловит то, чего
+                 не ловит stall_timeout: размышления идут непрерывно, но ответ
+                 не начинается (зацикливание в «думалке»).
     """
     payload = {"model": model, "messages": normalize_messages(messages),
                "stream": True}
@@ -385,8 +400,19 @@ def chat_stream(model: str, messages: list, options: "Optional[dict]" = None,
             raise OllamaError(f"Ollama отклонила запрос ({resp.status_code}): "
                               f"{_error_detail(resp)}")
 
-        splitter = (_ThinkSplitter(on_thinking)
+        think_started = None        # когда начались размышления (до первого токена ответа)
+        answered = False            # ответ уже пошёл - за размышлениями больше не следим
+
+        def _on_think(text):
+            nonlocal think_started
+            if think_started is None and not answered:
+                think_started = time.monotonic()
+            if on_thinking is not None:
+                on_thinking(text)
+
+        splitter = (_ThinkSplitter(_on_think)
                     if (on_thinking is not None and strip_inline_think) else None)
+        track_think = bool(think_timeout and think_timeout > 0)
         armed = False
         try:
             for raw_line in resp.iter_lines():
@@ -397,19 +423,23 @@ def chat_stream(model: str, messages: list, options: "Optional[dict]" = None,
                 err = parse_stream_error(raw_line)
                 if err:
                     raise OllamaError(f"Ollama: {err}")
-                if on_thinking is not None:
+                if on_thinking is not None or track_think:
                     t = parse_stream_thinking(raw_line)
                     if t:
-                        on_thinking(t)
+                        _on_think(t)
                 chunk = parse_stream_line(raw_line)
-                if not chunk:
-                    continue
-                if splitter is None:
-                    yield chunk
-                else:
-                    for visible in splitter.feed(chunk):
+                if chunk:
+                    visible_parts = [chunk] if splitter is None else splitter.feed(chunk)
+                    for visible in visible_parts:
                         if visible:
+                            answered = True        # пошёл ответ - размышления закончились
+                            think_started = None
                             yield visible
+                if (track_think and think_started is not None and not answered
+                        and time.monotonic() - think_started > think_timeout):
+                    raise OllamaThinkTimeoutError(
+                        f"Модель размышляет дольше {think_timeout:g} с и не начинает "
+                        "отвечать (ушла в бесконечные размышления).")
         except requests.exceptions.RequestException as e:
             if armed and _is_read_timeout(e):
                 raise OllamaStallError(

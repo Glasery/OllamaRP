@@ -72,7 +72,8 @@ from preset_ui import PresetManager, TextEditDialog
 from sessions import SessionStore, SessionError, normalize_snapshot
 from sessions_ui import SessionsDialog
 from ollama_client import (list_models, model_capabilities, chat_stream,
-                           parse_structured_reply, OllamaError, OllamaStallError)
+                           parse_structured_reply, OllamaError, OllamaStallError,
+                           OllamaThinkTimeoutError)
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -182,6 +183,10 @@ LOOP_MAX_RETRIES = 2
 # и шлём его заново, максимум STALL_MAX_RETRIES раз, дальше - ошибка в чат.
 # См. ollama_client.chat_stream(stall_timeout=...) и App._generate_worker.
 STALL_MAX_RETRIES = 3
+# Модель РАЗМЫШЛЯЕТ дольше think_timeout и ответ не начался (токены идут, поэтому
+# таймаут «молчания» не срабатывает): обрываем и шлём заново, максимум
+# THINK_MAX_RETRIES раз; со 2-й попытки размышления отключаются (если модель умеет).
+THINK_MAX_RETRIES = 3
 
 # Аватарка рядом с репликой в диалоге: высота = столько строк текста чата
 # (считаем от шрифта, поэтому ровно ложится и при масштабе экрана 125/150 %);
@@ -2381,20 +2386,26 @@ class App(ctk.CTk):
         self.token_queue.put("__DYN_BUILDING__")
         prot = self.active.get("protagonist")
         lang = i18n.get_lang()
+        # "delta" (обычно): модель возвращает только ИЗМЕНЕНИЯ - вывод в десятки
+        # раз короче, запрос быстрый; "full" - полная перезапись, только когда
+        # память заполнена (>= REWRITE_AT предела) и её надо сжать
+        mode = dynamic_memory.choose_mode(char.dyn_memory, self._dyn_limit, lang)
         msgs = dynamic_memory.build_messages(
             char.name, getattr(prot, "name", "") or "", char.dyn_memory,
             list(self.dyn_new), limit=self._dyn_limit, lang=lang,
-            rules=getattr(char, "dyn_prompt", ""))
-        # ответ - JSON по схеме (structured outputs): пять разделов гарантированы
-        # форматом; num_predict с запасом под предел размера (+ служебный JSON)
+            rules=getattr(char, "dyn_prompt", ""), mode=mode)
+        # ответ - JSON по схеме (structured outputs): разделы гарантированы форматом
+        if mode == "delta":
+            schema, num_predict = dynamic_memory.DYN_DELTA_SCHEMA, 900
+        else:
+            schema, num_predict = dynamic_memory.DYN_SCHEMA, int(self._dyn_limit / 1.5) + 600
         text = self._run_hidden(
-            model, msgs, self._mem_opts(options, int(self._dyn_limit / 1.5) + 600),
-            keep_alive,
-            t("log_dyn_request", name=char.name or "?", model=model),
-            t("log_dyn_response", name=char.name or "?", model=model),
-            response_format=dynamic_memory.DYN_SCHEMA)
+            model, msgs, self._mem_opts(options, num_predict), keep_alive,
+            t("log_dyn_request", name=char.name or "?", model=model) + f" [{mode}]",
+            t("log_dyn_response", name=char.name or "?", model=model) + f" [{mode}]",
+            response_format=schema)
         status, new = dynamic_memory.interpret_reply(
-            text, char.dyn_memory, self._dyn_limit, lang)
+            text, char.dyn_memory, self._dyn_limit, lang, mode)
         name = char.name or "?"
         if status == "changed":
             char.dyn_memory = new
@@ -2948,6 +2959,7 @@ class App(ctk.CTk):
                 args=(model, list(self.history), self.stop_event, inf.to_options(),
                       think, inf.keep_alive or None, None, False, 0, "\n\n",
                       inf.digest_prompt, inf.stall_seconds(), ""),
+                kwargs={"think_timeout": inf.think_seconds()},
                 daemon=True).start()
             return
 
@@ -3080,6 +3092,7 @@ class App(ctk.CTk):
                   inf.keep_alive or None, response_format, structured,
                   digest_window, reply_sep, inf.digest_prompt,
                   inf.stall_seconds(), av_char, self._dyn_char(inf)),
+            kwargs={"think_timeout": inf.think_seconds()},
             daemon=True).start()
 
     # -------------------------------------- предпроверка контекста ----
@@ -3463,7 +3476,7 @@ class App(ctk.CTk):
     def _generate_worker(self, model, messages, stop_event, options, think,
                          keep_alive, response_format=None, structured=False,
                          digest_window=0, reply_sep="", digest_prompt="",
-                         stall_timeout=0, avatar_file="", dyn_char=None):
+                         stall_timeout=0, avatar_file="", dyn_char=None, think_timeout=0):
         orig_messages = list(messages)    # неизменный исходный запрос
         base_messages = orig_messages     # что уйдёт СЛЕДУЮЩЕЙ попыткой
         base_options = options            # для пересборки памяти - без anti-dup правок
@@ -3471,6 +3484,7 @@ class App(ctk.CTk):
         had_error = False
         attempt = 0
         stall_retries = 0     # сколько раз уже перезапрашивали из-за тишины модели
+        think_retries = 0     # ...и из-за слишком долгих размышлений
         sep_pushed = False    # reply_sep в чат отдаём один раз за весь вызов
         story_prefix = ""   # чистый текст, уже принятый из попыток, оборванных
                              # из-за зацикливания (не-structured режим)
@@ -3489,6 +3503,7 @@ class App(ctk.CTk):
             think_buffer = []
             loop_kept = None      # find_repeat_loop() поймал цикл - что сохранить
             stalled = False       # модель замолчала дольше stall_timeout
+            think_stalled = False  # модель размышляет дольше think_timeout
 
             def on_thinking(text, _tb=think_buffer):
                 if not _tb:
@@ -3502,7 +3517,8 @@ class App(ctk.CTk):
                                          on_request=on_request, on_thinking=on_thinking,
                                          response_format=response_format,
                                          strip_inline_think=not structured,
-                                         stall_timeout=stall_timeout):
+                                         stall_timeout=stall_timeout,
+                                         think_timeout=think_timeout):
                     if not buffer:
                         self.token_queue.put("__ANSWERING__")
                         if not structured and reply_sep and not sep_pushed:
@@ -3521,6 +3537,8 @@ class App(ctk.CTk):
                                 min_hits=LOOP_MIN_HITS)
                             if loop_kept is not None:
                                 break   # закрываем стрим прямо на месте цикла
+            except OllamaThinkTimeoutError:
+                think_stalled = True    # не ошибка: обработаем ниже (перезапрос)
             except OllamaStallError:
                 stalled = True    # не ошибка: обработаем ниже (перезапрос)
             except OllamaError as e:
@@ -3557,6 +3575,34 @@ class App(ctk.CTk):
                 self.token_queue.put(f"\n{t('err_inline', err=msg)}\n")
                 self.log_queue.put(self._fmt_log_entry(
                     t("log_retry_stall_gaveup", n=STALL_MAX_RETRIES), msg))
+                had_error = True
+
+            # --- модель РАЗМЫШЛЯЕТ слишком долго и ответ не начался (токены
+            # размышления идут, поэтому «молчание» не сработало): обрываем и
+            # шлём заново с новым seed. Со 2-й попытки - с think=False, если
+            # у модели есть capability "thinking" (иначе Ollama вернёт 400):
+            # так ответ точно пойдёт, пусть и без размышлений.
+            if think_stalled and not stop_event.is_set():
+                if think_retries < THINK_MAX_RETRIES:
+                    think_retries += 1
+                    no_think = False
+                    if (think_retries >= 2 and think is not False
+                            and "thinking" in self._model_caps):
+                        think = False
+                        no_think = True
+                    self.token_queue.put(
+                        ("__RETRY_THINK__", think_retries, THINK_MAX_RETRIES,
+                         think_timeout, no_think))
+                    self.log_queue.put(self._fmt_log_entry(
+                        t("log_retry_think", s=think_timeout, i=think_retries,
+                          n=THINK_MAX_RETRIES) + (t("log_retry_think_off") if no_think else ""),
+                        ("".join(think_buffer)[-1500:]) or t("empty_reply")))
+                    options = {**options, "seed": random.randint(1, 2**31 - 1)}
+                    continue
+                msg = t("think_gaveup_err", n=THINK_MAX_RETRIES, s=think_timeout)
+                self.token_queue.put(f"\n{t('err_inline', err=msg)}\n")
+                self.log_queue.put(self._fmt_log_entry(
+                    t("log_retry_think_gaveup", n=THINK_MAX_RETRIES), msg))
                 had_error = True
 
             # Финальная подстраховка: если генерация закончилась САМА (EOS),
@@ -3686,9 +3732,11 @@ class App(ctk.CTk):
                                                digest_window, digest_prompt)
         # Динамическая память персонажа: НЕ в тот же ход, когда только что
         # собиралась память диалога (два скрытых запроса подряд - слишком
-        # долгое ожидание); обновится на следующем ходу.
+        # долгое ожидание) и не после каждой сводки, а когда их накопилось
+        # DYN_MIN_NEW (т.е. вдвое реже); при сохранении диалога обновляется
+        # независимо от порога (_dyn_flush_worker).
         if (got_reply and not stopped and not folded and dyn_char is not None
-                and self.dyn_new):
+                and len(self.dyn_new) >= dynamic_memory.DYN_MIN_NEW):
             self._dyn_update(model, base_options, keep_alive, dyn_char)
 
         if stopped:
@@ -4041,6 +4089,11 @@ class App(ctk.CTk):
                 elif isinstance(item, tuple) and item and item[0] == "__TURN__":
                     self._begin_turn(item[1])        # аватарка перед репликой персонажа
                     self._emote_advance("character")  # и следующий эмотикон собеседника
+                elif isinstance(item, tuple) and item and item[0] == "__RETRY_THINK__":
+                    _, i, n, secs, no_think = item
+                    self.gen_status.configure(
+                        text=t("st_retry_think_off" if no_think else "st_retry_think",
+                               s=secs, i=i, n=n))
                 elif isinstance(item, tuple) and item and item[0] == "__RETRY_STALL__":
                     # только статус (запись в Logs уже сделал воркер) - в чат
                     # ничего не пишем, как и у остальных авто-перезапросов
