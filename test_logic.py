@@ -1617,7 +1617,7 @@ def test_think_timeout_config():
     в options для Ollama не идёт, поле есть в Settings."""
     assert InferenceConfig().think_seconds() == 60
     assert InferenceConfig.from_dict({}).think_seconds() == 60               # старый settings.json
-    assert InferenceConfig.from_dict({"think_timeout": 45}).think_seconds() == 60
+    assert InferenceConfig.from_dict({"think_timeout": 45}).think_seconds() == 45
     assert InferenceConfig.from_dict({"think_timeout": 0}).think_seconds() == 0
     assert InferenceConfig.from_dict({"think_timeout": -5}).think_seconds() == 0
     for bad in ("x", True, None, [], {}):
