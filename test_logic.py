@@ -1612,21 +1612,21 @@ def test_dynamic_memory_marker_variants():
 
 
 def test_think_timeout_config():
-    """Settings: think_timeout - секунды «размышляет» до перезапроса. Дефолт 90,
-    пусто/мусор/bool/старый settings.json -> 90, 0 и меньше -> выкл, round-trip,
+    """Settings: think_timeout - секунды «размышляет» до перезапроса. Дефолт 60,
+    пусто/мусор/bool/старый settings.json -> 60, 0 и меньше -> выкл, round-trip,
     в options для Ollama не идёт, поле есть в Settings."""
-    assert InferenceConfig().think_seconds() == 90
-    assert InferenceConfig.from_dict({}).think_seconds() == 90               # старый settings.json
-    assert InferenceConfig.from_dict({"think_timeout": 45}).think_seconds() == 45
+    assert InferenceConfig().think_seconds() == 60
+    assert InferenceConfig.from_dict({}).think_seconds() == 60               # старый settings.json
+    assert InferenceConfig.from_dict({"think_timeout": 45}).think_seconds() == 60
     assert InferenceConfig.from_dict({"think_timeout": 0}).think_seconds() == 0
     assert InferenceConfig.from_dict({"think_timeout": -5}).think_seconds() == 0
     for bad in ("x", True, None, [], {}):
-        assert InferenceConfig.from_dict({"think_timeout": bad}).think_seconds() == 90, bad
-    assert InferenceConfig(think_timeout=None).think_seconds() == 90         # пустое поле в UI
+        assert InferenceConfig.from_dict({"think_timeout": bad}).think_seconds() == 60, bad
+    assert InferenceConfig(think_timeout=None).think_seconds() == 60         # пустое поле в UI
     c = InferenceConfig(think_timeout=30)
     assert InferenceConfig.from_dict(c.to_dict()).think_seconds() == 30
     assert "think_timeout" not in c.to_options()
-    assert InferenceConfig.optimal().think_seconds() == 90
+    assert InferenceConfig.optimal().think_seconds() == 60
     assert any(f["attr"] == "think_timeout" and f["kind"] == "int" for f in INFERENCE_FIELDS)
 
 
@@ -1803,6 +1803,35 @@ def test_dynamic_memory_delta_mode():
     # legacy «плоская» память мигрирует и в дельта-режиме
     st, new = dm.interpret_reply(reply(relationships=["Сблизились"]), "- старая запись", mode="delta")
     assert st == "changed" and "### Важные события\n- старая запись" in new and "- Сблизились" in new
+
+
+def test_strip_reasoning_on_think_retry():
+    """strip_reasoning: на повторе после зависания в размышлениях из system-промпта
+    убирается просьба рассуждать (REASONING_NUDGE, RU и EN), в конец добавляется
+    «отвечай сразу»; вход не мутируется, повторный вызов идемпотентен, остальное
+    содержимое и сообщения не затрагиваются. Нужен моделям без capability thinking,
+    которым think=False слать нельзя."""
+    import prompt_builder as pb
+    body = "Ты играешь роль персонажа.\n\nНапоминание про язык"
+    sysm = build_system_prompt(character=Character(name="К"), environment=Environment(),
+                               scenario=Scenario(), mode="dialogue", reasoning_nudge=True)
+    assert pb.REASONING_NUDGE in sysm                               # просьба реально была в промпте
+    msgs = [{"role": "system", "content": pb.REASONING_NUDGE + "\n\n" + body},
+            {"role": "user", "content": "привет"}]
+    snapshot = [dict(m) for m in msgs]
+    out = pb.strip_reasoning(msgs)
+    assert msgs == snapshot                                          # исходник не тронут
+    assert pb.REASONING_NUDGE not in out[0]["content"]
+    assert body in out[0]["content"] and out[0]["content"].rstrip().endswith(pb.NO_THINK_DIRECTIVE)
+    assert out[1] == msgs[1]
+    assert pb.strip_reasoning(out)[0]["content"].count(pb.NO_THINK_DIRECTIVE) == 1   # идемпотентно
+    en = pb.strip_reasoning([{"role": "system", "content": pb.REASONING_NUDGE_EN + "\n\nYou play a role."}])
+    assert pb.REASONING_NUDGE_EN not in en[0]["content"]
+    assert en[0]["content"].rstrip().endswith(pb.NO_THINK_DIRECTIVE_EN) and "You play a role." in en[0]["content"]
+    # промпт, где просьбы не было, только получает директиву; пустой вход не падает
+    plain = pb.strip_reasoning([{"role": "system", "content": body}])
+    assert body in plain[0]["content"] and pb.NO_THINK_DIRECTIVE in plain[0]["content"]
+    assert pb.strip_reasoning([]) == [] and pb.strip_reasoning(None) == []
 
 
 def test_stall_timeout_config():

@@ -584,9 +584,11 @@ _UI = {
         "en": "THINKING TOO LONG — RESEND LIMIT REACHED ({n}), no reply received"},
     "think_gaveup_err": {
         "ru": "модель размышляет слишком долго: {n} повторных запросов подряд без ответа "
-              "(лимит {s} с, настраивается в Settings)",
+              "(лимит {s} с, настраивается в Settings). Попробуйте переформулировать "
+              "реплику или выключить «Reasoning» в Settings.",
         "en": "the model thinks for too long: {n} resends in a row with no reply "
-              "(limit {s}s, set in Settings)"},
+              "(limit {s}s, set in Settings). Try rephrasing your line or turning "
+              "“Reasoning” off in Settings."},
     "log_retry_stall_gaveup": {
         "ru": "ЗАВИСАНИЕ МОДЕЛИ — ЛИМИТ ПОВТОРНЫХ ЗАПРОСОВ ИСЧЕРПАН ({n}), ответ не получен",
         "en": "MODEL STALLED — RESEND LIMIT REACHED ({n}), no reply received"},
@@ -901,7 +903,7 @@ _INF_HELP_EN = {
         "error). From the second attempt, if the model supports it, thinking is "
         "switched off entirely so that an answer is sure to come. It differs from "
         "the “model is silent” timeout: this one counts the time while thinking "
-        "tokens ARE flowing but there is no answer yet. Empty — 90 s, 0 — off. "
+        "tokens ARE flowing but there is no answer yet. Empty — 60 s, 0 — off. "
         "Every resend is visible in the generation status and in Logs.",
     "dyn_memory_limit":
         "Maximum size of a character's dynamic memory (the checkbox in the "

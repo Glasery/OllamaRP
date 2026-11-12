@@ -59,7 +59,7 @@ from blocks import BLOCK_SPECS, BLOCK_ORDER
 from inference_spec import INFERENCE_FIELDS
 from models import InferenceConfig, EMOTES_MODES
 from storage import PresetStore
-from prompt_builder import (build_system_prompt,
+from prompt_builder import (build_system_prompt, strip_reasoning,
                             build_segment_summary_messages,
                             build_consolidation_messages,
                             build_compress_messages,
@@ -3585,11 +3585,8 @@ class App(ctk.CTk):
             if think_stalled and not stop_event.is_set():
                 if think_retries < THINK_MAX_RETRIES:
                     think_retries += 1
-                    no_think = False
-                    if (think_retries >= 2 and think is not False
-                            and "thinking" in self._model_caps):
-                        think = False
-                        no_think = True
+                    # 2-я и последующие попытки - БЕЗ размышлений (см. ниже)
+                    no_think = think_retries >= 2
                     self.token_queue.put(
                         ("__RETRY_THINK__", think_retries, THINK_MAX_RETRIES,
                          think_timeout, no_think))
@@ -3597,7 +3594,21 @@ class App(ctk.CTk):
                         t("log_retry_think", s=think_timeout, i=think_retries,
                           n=THINK_MAX_RETRIES) + (t("log_retry_think_off") if no_think else ""),
                         ("".join(think_buffer)[-1500:]) or t("empty_reply")))
-                    options = {**options, "seed": random.randint(1, 2**31 - 1)}
+                    # Одинаковые повторы с новым seed зацикливались так же: на КАЖДОМ
+                    # повторе меняем сэмплинг (против петель), а на 2-м и дальше
+                    # отключаем размышления: официальным think=False (если у модели
+                    # есть capability thinking; иначе Ollama вернёт 400) И убирая
+                    # просьбу рассуждать из самого промпта - для моделей без
+                    # capability это единственный способ их отключить.
+                    options = {**options, "seed": random.randint(1, 2**31 - 1),
+                              "temperature": min(float(options.get("temperature") or 0.8), 0.8),
+                              "repeat_penalty": max(float(options.get("repeat_penalty") or 0), 1.12),
+                              "repeat_last_n": max(int(options.get("repeat_last_n") or 0), 256)}
+                    if no_think:
+                        if think is not False and "thinking" in self._model_caps:
+                            think = False
+                        orig_messages = strip_reasoning(orig_messages)
+                        base_messages = orig_messages
                     continue
                 msg = t("think_gaveup_err", n=THINK_MAX_RETRIES, s=think_timeout)
                 self.token_queue.put(f"\n{t('err_inline', err=msg)}\n")

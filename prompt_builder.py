@@ -155,6 +155,46 @@ REASONING_NUDGE_EN = (
     "line and actions - no tags, no analysis, no explanations."
 )
 
+# Обратное REASONING_NUDGE: при зависании в размышлениях (think_timeout) на повторных
+# попытках просьбу рассуждать из промпта убираем и просим отвечать сразу.
+NO_THINK_DIRECTIVE = (
+    "Не рассуждай и не пиши блок <think> (и [THINK]) - отвечай сразу: только "
+    "реплика и действия персонажа."
+)
+NO_THINK_DIRECTIVE_EN = (
+    "Do not reason and do not write a <think> (or [THINK]) block - answer "
+    "immediately: only the character's line and actions."
+)
+
+
+def strip_reasoning(messages: list) -> list:
+    """Копия messages без просьбы рассуждать (REASONING_NUDGE) в первом
+    system-сообщении + короткое «отвечай сразу» в его конце. Используется на
+    повторных попытках после зависания в размышлениях: модель БЕЗ capability
+    `thinking` рассуждает только потому, что её об этом попросили в промпте,
+    а `think=false` ей слать нельзя (Ollama вернёт 400) - значит, единственный
+    способ отключить размышления - убрать просьбу из самого промпта."""
+    out = [dict(m) for m in (messages or [])]
+    for m in out:
+        if m.get("role") == "system":
+            text = m.get("content") or ""
+            for nudge in (REASONING_NUDGE, REASONING_NUDGE_EN):
+                text = text.replace(nudge + "\n\n", "").replace(nudge + "\n", "").replace(nudge, "")
+            directive = NO_THINK_DIRECTIVE_EN if _is_en_text(text) else NO_THINK_DIRECTIVE
+            if directive not in text:
+                text = text.rstrip() + "\n\n" + directive
+            m["content"] = text.lstrip("\n")
+            break
+    return out
+
+
+def _is_en_text(text: str) -> bool:
+    """Системный промпт английский? (по маркеру языкового правила/напоминания:
+    в русском есть кириллица в инструкциях)."""
+    head = (text or "")[:600]
+    return not any("\u0400" <= ch <= "\u04ff" for ch in head)
+
+
 # Режим structured_dialogue: жёсткое разделение действий и речи через JSON.
 STRUCTURED_DIALOGUE_INSTRUCTIONS = (
     "Формат ответа строго раздельный. Верни JSON с двумя полями: "

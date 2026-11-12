@@ -1055,12 +1055,23 @@ Ollama. Нативное окно на CustomTkinter (обычный Tkinter п�
   `OllamaThinkTimeoutError` (не наследник `OllamaStallError`); проверка после
   каждой строки стрима, в т.ч. «только размышления». В `_generate_worker`
   (`think_stalled`, `THINK_MAX_RETRIES=3`): оборвать и перезапросить с новым
-  seed; **со 2-й попытки `think=False`**, если у модели есть capability
-  `thinking` (иначе Ollama вернёт 400) - так ответ точно пойдёт; статус
+  seed. **Лестница повторов** (одинаковые повторы с новым seed зацикливались так
+  же - найдено на модели БЕЗ capability `thinking` (Ministral Reasoning из
+  `hf.co`), у которой «размышляет» появляется только при Reasoning=включить:
+  `_resolve_reasoning` даёт `nudge=True` - просьба `REASONING_NUDGE` в system
+  - и она повторялась на каждом ретрае): с 1-го повтора меняется сэмплинг
+  (`temperature<=0.8`, `repeat_penalty>=1.12`, `repeat_last_n>=256`); со 2-го
+  (`no_think`) - `think=False`, если capability `thinking` есть (иначе Ollama
+  вернёт 400), И `prompt_builder.strip_reasoning` (убирает `REASONING_NUDGE`
+  RU/EN из первого system, добавляет `NO_THINK_DIRECTIVE` в конец; идемпотентно)
+  применяется к `orig_messages`/`base_messages`, т.е. переживает и последующие
+  ретраи повторов/зацикливаний. Ошибка после лимита подсказывает
+  переформулировать реплику / выключить Reasoning; статус
   `__RETRY_THINK__` (`st_retry_think`/`st_retry_think_off`), в Logs - заголовок
   «ДОЛГИЕ РАЗМЫШЛЕНИЯ» + хвост размышлений неудачной попытки; после лимита -
   ошибка в чат. «Стоп» перезапрос не запускает. Тесты:
-  `test_think_timeout_config`, `test_chat_stream_think_timeout_real_socket`.
+  `test_think_timeout_config`, `test_chat_stream_think_timeout_real_socket`,
+  `test_strip_reasoning_on_think_retry`.
 - **Таймаут «модель молчит» (`stall_timeout`)** - ответ уже пошёл
   (чаще всего завис на этапе «размышляет»: статус `st_think`, токены
   перестали приходить), но Ollama молчит. Раньше оставалось только вручную
