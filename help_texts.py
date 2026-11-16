@@ -432,7 +432,12 @@ _FAQ_RU = [
           "только на чтение прямо под выбором персонажа. Имена обоих персонажей и героя "
           "должны различаться. Переключатель «Заглушить» под персонажем "
           "временно убирает его из сцены: герой общается только со вторым, "
-          "автодиалог недоступен, пока кто-то заглушён."),
+          "автодиалог недоступен, пока кто-то заглушён. Длина реплик меняется от "
+          "хода к ходу: то короткая фраза, то пара предложений, то развёрнутый "
+          "ответ; после короткой реплики чаще звучит короткий ответ. Среднюю "
+          "длину реплики задаёт ползунок «Средняя длина реплики» на панели «Сцена». Каждый "
+          "персонаж говорит только за себя: если модель всё же впишет в реплику "
+          "чужие слова с подписью («…» — Имя), реплика обрезается до этого места."),
 
     ("q", "Что такое динамическая память персонажа?"),
     ("p", "Галка в «Настроить» у персонажа (только собеседник). Приложение "
@@ -656,7 +661,12 @@ _FAQ_EN = [
           "The names of both characters and the hero must differ. The “Mute” switch "
           "under a character temporarily removes them from the scene: the hero talks "
           "only to the other one, and the auto-dialogue is unavailable while someone "
-          "is muted."),
+          "is muted. Line length changes from turn to turn: a short phrase, a couple "
+          "of sentences or a longer answer; a short line is more often followed by a "
+          "short reply. The average length is set by the “Average line length” slider "
+          "on the Scene panel. Each character speaks only for themselves: if the model still "
+          "writes someone else's tagged words into a line («…» - Name), the line is "
+          "cut at that point."),
 
     ("q", "What is a character's dynamic memory?"),
     ("p", "A checkbox in “Manage” of a character (companions only). The app "

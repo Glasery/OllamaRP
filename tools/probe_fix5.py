@@ -6,11 +6,12 @@ import group_chat as gc
 PLAN.clear(); PLAN["*"] = ["Лайрис"]
 # 1) потолок токенов и меньший лимит из Settings
 setw("num_predict", "-1"); n0 = hero("Привет", "Ксана"); pump(lambda: idle() and len(REQS) > n0, 400)
-check("num_predict=-1 в Settings -> в запросе 600", REQS[n0]["num_predict"] == 600, REQS[n0]["num_predict"])
+check("num_predict=-1 в Settings -> в запросе потолок класса длины (300/450/600)", REQS[n0]["num_predict"] in {np for _c, np in gc.LENGTHS.values()}, REQS[n0]["num_predict"])
+check("в конце запроса - указание длины реплики", "Длина этой реплики" in REQS[n0]["user"] and REQS[n0]["user"].rstrip().endswith("отвечай ещё короче."), REQS[n0]["user"][-200:])
 setw("num_predict", "200"); n1 = hero("Ещё", "Ксана"); pump(lambda: idle() and len(REQS) > n1, 400)
 check("меньший лимит из Settings (200) сохраняется", REQS[n1]["num_predict"] == 200, REQS[n1]["num_predict"])
 setw("num_predict", "9999"); n1 = hero("И ещё", "Ксана"); pump(lambda: idle() and len(REQS) > n1, 400)
-check("больший лимит (9999) режется до 600", REQS[n1]["num_predict"] == 600, REQS[n1]["num_predict"])
+check("больший лимит (9999) режется до потолка класса (<= 600)", REQS[n1]["num_predict"] in {np for _c, np in gc.LENGTHS.values()}, REQS[n1]["num_predict"])
 setw("num_predict", "")
 # 2) «стена текста»: бесконечный повтор внутри JSON
 app._on_clear_all(); REQS.clear(); RUNAWAY["on"] = True; PLAN["*"] = ["Виктар"]
@@ -39,6 +40,7 @@ check("«Кому» выше кнопки «Отправить», по прав�
       w.winfo_ismapped() and w.winfo_rooty() + w.winfo_height() <= send.winfo_rooty() + 2
       and abs((app._group_to_menu.winfo_rootx() + app._group_to_menu.winfo_width()) - (send.winfo_rootx() + send.winfo_width())) <= 4,
       (w.winfo_rootx() + w.winfo_width(), send.winfo_rootx() + send.winfo_width(), w.winfo_rooty() + w.winfo_height(), send.winfo_rooty()))
+check("левый край списка «Кому» ровно над левым краем кнопок", abs(app._group_to_menu.winfo_rootx() - send.winfo_rootx()) <= 2, (app._group_to_menu.winfo_rootx(), send.winfo_rootx()))
 check("по центру строки подписи «Действие героя» (вертикаль)", abs(cy(w) - cy(lbl)) <= 3, (cy(w), cy(lbl)))
 check("меню адресата внутри обёртки выровнено по центру", abs(cy(app._group_to_menu) - cy(w)) <= 3, (cy(app._group_to_menu), cy(w)))
 from PIL import ImageGrab

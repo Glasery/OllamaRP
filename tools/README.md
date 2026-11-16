@@ -13,8 +13,12 @@
     venv\Scripts\python.exe tools\probe_group2.py
     venv\Scripts\python.exe tools\probe_mute.py
     venv\Scripts\python.exe tools\probe_fix5.py
+    venv\Scripts\python.exe tools\probe_fix6.py
 
-`probe_group2/mute/fix5` исполняют «голову» `probe_group.py` (сервер + приложение +
-помощники `check/pump/hero/idle`). Окно приложения открывается на экране на время
+`probe_group2/mute/fix5/fix6` исполняют «голову» `probe_group.py` (сервер + приложение +
+помощники `check/pump/hero/idle`). Поддельный сервер, как настоящая Ollama,
+отдаёт поля ответа по алфавиту (ключ адресата `To`). `probe_fix6` - случайная
+длина у обоих персонажей, адресат по тексту, мьют, окно «мало контекста»,
+ползунок «Средняя длина реплики» (скриншот `tools/group_len.png`). Окно приложения открывается на экране на время
 прогона (~1-2 мин каждый); трогать мышь/клавиатуру в это время не нужно.
 Юнит-тесты логики: `venv\Scripts\python.exe test_logic.py`.

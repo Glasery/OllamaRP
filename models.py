@@ -11,7 +11,7 @@ from typing import Optional
 import uuid
 
 from dynamic_memory import DYN_MEMORY_LIMIT, clamp_limit
-from group_chat import AUTO_TURNS_DEFAULT, clamp_turns
+from group_chat import AUTO_TURNS_DEFAULT, clamp_turns, REPLY_LEN_DEFAULT, clamp_reply_len
 
 
 def _new_id() -> str:
@@ -237,6 +237,7 @@ class InferenceConfig:
     show_gallery: bool = True           # ГАЛЕРЕЯ: вкладки «Фото» в боковых панелях (диалог)
     show_emotes: bool = False           # ЭМОТИКОНЫ поверх интерфейса (экспериментально, Windows)
     group_turns: Optional[int] = AUTO_TURNS_DEFAULT  # лимит реплик автодиалога (режим «Группа»)
+    group_reply_len: Optional[int] = REPLY_LEN_DEFAULT  # средняя длина реплики «Группы», симв. речи
     emotes_mode: str = "all"            # UI: кнопка вверху - "all" / "companion" (только
                                         # собеседник) / "hidden" (свёрнуты)
     dyn_memory_limit: Optional[int] = DYN_MEMORY_LIMIT  # предел динамической памяти, симв.
@@ -323,6 +324,7 @@ class InferenceConfig:
             show_emotes=se if isinstance(se, bool) else False,
             emotes_mode=em,
             group_turns=clamp_turns(d.get("group_turns")),
+            group_reply_len=clamp_reply_len(d.get("group_reply_len")),
             dyn_memory_limit=clamp_limit(d.get("dyn_memory_limit")),
             last_model=d.get("last_model") if isinstance(d.get("last_model"), str) else "",
         )

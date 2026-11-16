@@ -155,6 +155,15 @@ _UI = {
     "group_pausing_btn": {"ru": "‖ …", "en": "‖ …"},
     "group_step_btn": {"ru": "» Шаг", "en": "» Step"},
     "group_turns_label": {"ru": "Лимит реплик автодиалога", "en": "Auto-dialogue line limit"},
+    "group_len_label": {"ru": "Средняя длина реплики", "en": "Average line length"},
+    "group_len_value": {"ru": "~{n} симв.", "en": "~{n} chars"},
+    "group_len_help": {
+        "ru": "Сколько в среднем говорит персонаж за реплику (символов речи). Длина всё равно "
+              "меняется от хода к ходу: короткая / средняя / развёрнутая реплика, на короткую "
+              "фразу - чаще короткий ответ. Действие и лимит токенов подстраиваются сами.",
+        "en": "How much a character says per line on average (characters of speech). The length "
+              "still varies from turn to turn: short / medium / longer line, a short remark more "
+              "often gets a short answer. The action and the token limit adjust by themselves."},
     "group_turns_help": {
         "ru": "Сколько реплик подряд персонажи говорят сами после «▶ Авто» (1–200). Автодиалог "
               "сам останавливается раньше, если к вам обращаются: ответьте или нажмите «▶ Авто» / «» Шаг».",

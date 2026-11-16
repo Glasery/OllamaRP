@@ -849,6 +849,23 @@ class App(ctk.CTk):
         ctk.CTkLabel(gsec, text=t("group_turns_help"), anchor="w", justify="left",
                      wraplength=380, text_color="gray",
                      font=ctk.CTkFont(size=11)).pack(fill="x", pady=(PAD_TIGHT, 0))
+        # --- «Группа»: средняя длина реплики (ползунок, символов речи) ---
+        lrow = ctk.CTkFrame(gsec, fg_color="transparent")
+        lrow.pack(fill="x", pady=(PAD, 0))
+        ctk.CTkLabel(lrow, text=t("group_len_label"), anchor="w").pack(side="left")
+        self._group_len_val_lbl = ctk.CTkLabel(lrow, text="", anchor="e")
+        self._group_len_val_lbl.pack(side="right")
+        self._group_len_var = tk.IntVar(value=group_chat.REPLY_LEN_DEFAULT)
+        step = 10
+        self._group_len_slider = ctk.CTkSlider(
+            gsec, from_=group_chat.REPLY_LEN_MIN, to=group_chat.REPLY_LEN_MAX,
+            number_of_steps=(group_chat.REPLY_LEN_MAX - group_chat.REPLY_LEN_MIN) // step,
+            variable=self._group_len_var, command=lambda _v: self._on_group_len())
+        self._group_len_slider.pack(fill="x", pady=(PAD_TIGHT, 0))
+        ctk.CTkLabel(gsec, text=t("group_len_help"), anchor="w", justify="left",
+                     wraplength=380, text_color="gray",
+                     font=ctk.CTkFont(size=11)).pack(fill="x", pady=(PAD_TIGHT, 0))
+        self._on_group_len(save=False)
         self.group_params_section = gsec
 
         # --- story: несколько персонажей ---
@@ -1225,6 +1242,8 @@ class App(ctk.CTk):
         kwargs["emotes_mode"] = getattr(self, "_emotes_mode", "all")
         gv = getattr(self, "_group_turns_var", None)
         kwargs["group_turns"] = group_chat.clamp_turns(gv.get() if gv is not None else None)
+        lv = getattr(self, "_group_len_var", None)
+        kwargs["group_reply_len"] = group_chat.clamp_reply_len(lv.get() if lv is not None else None)
         kwargs["ui_language"] = getattr(self, "_ui_language", "ru")
         # плейсхолдеры ("...", "модели не найдены") не запоминаем - иначе
         # сохранение в момент, когда Ollama временно недоступна/список
@@ -1248,6 +1267,8 @@ class App(ctk.CTk):
             self._left_hidden = bool(cfg.left_panel_hidden)
             self._emotes_mode = cfg.emotes_mode
             self._group_turns_var.set(str(cfg.group_turns))
+            self._group_len_var.set(group_chat.clamp_reply_len(cfg.group_reply_len))
+            self._on_group_len(save=False)
         _tl = i18n.think_labels()
         for attr, (kind, w) in self._inf_widgets.items():
             val = getattr(cfg, attr)
@@ -1267,6 +1288,36 @@ class App(ctk.CTk):
         # Очистить / загрузка настроек) - вкладки «Фото» подстроить
         if hasattr(self, "_left_seg") and hasattr(self, "_tab_logs"):
             self._sync_side_tabs()
+
+    def _on_group_len(self, save: bool = True):
+        """Ползунок «Средняя длина реплики» («Группа»): подпись со значением
+        (шаг 10 символов) и отложенное сохранение в settings.json (не на
+        каждый шаг перетаскивания). Применяется со следующей реплики."""
+        try:
+            raw = self._group_len_var.get()
+        except (tk.TclError, ValueError):
+            raw = None
+        v = group_chat.clamp_reply_len(raw)
+        v = int(round(v / 10.0)) * 10
+        if raw != v:
+            self._group_len_var.set(v)
+        self._group_len_val_lbl.configure(text=t("group_len_value", n=v))
+        if not save:
+            return
+        job = getattr(self, "_group_len_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+
+        def _save():
+            self._group_len_job = None
+            try:
+                self.store.save_settings(self._collect_inference_config())
+            except Exception:
+                pass
+        self._group_len_job = self.after(800, _save)
 
     def _save_inference(self):
         self.store.save_settings(self._collect_inference_config())
@@ -1495,7 +1546,9 @@ class App(ctk.CTk):
         self._dlg_action_lbl.pack(side="left")
         # «Группа»: кому адресована реплика героя (в «Диалоге» скрыто). Стоит в
         # правом верхнем углу всей формы - над колонкой кнопок, на одной линии с
-        # подписью «Действие героя» (28 px - высота строки подписи, как у pady кнопок)
+        # подписью «Действие героя» (28 px - высота строки подписи, как у pady кнопок).
+        # Ширина списка = ширине колонки кнопок (124): левый край ровно над кнопками,
+        # подпись «Кому:» - левее, над полем ввода.
         self._group_to_wrap = ctk.CTkFrame(form, fg_color="transparent", width=214, height=28)
         self._group_to_wrap.pack_propagate(False)
         to_inner = ctk.CTkFrame(self._group_to_wrap, fg_color="transparent")
@@ -1505,7 +1558,7 @@ class App(ctk.CTk):
         self._group_to_var = tk.StringVar(value="")
         self._group_to_menu = ctk.CTkOptionMenu(
             to_inner, variable=self._group_to_var, values=[t("group_to_all")],
-            width=150, height=24, dynamic_resizing=False)
+            width=124, height=24, dynamic_resizing=False)
         self._group_to_menu.pack(side="left")
         self.act_box = ctk.CTkTextbox(self._dlg_input, height=52, wrap="word")
         self.act_box.grid(row=1, column=0, sticky="ew")
@@ -3669,17 +3722,24 @@ class App(ctk.CTk):
                 sp = (system_prompt + "\n\n" + memory_header(lang) + "\n"
                       + self.chat_digest.strip())
             recent = self.history[self.digested_upto:]
+        # длина реплики - случайная на каждый ход (короткая/средняя/развёрнутая),
+        # см. group_chat.pick_length; смотрим по ВСЕЙ истории, не только по хвосту
+        # средняя длина - ползунок на панели «Сцена» (все потолки от неё)
+        avg = group_chat.clamp_reply_len(self._group_len_var.get())
+        length = group_chat.pick_length(self.history, speaker, avg=avg)
+        speech_cap, np_cap = group_chat.length_limits(length, avg)
         messages = [{"role": "system", "content": sp},
                     {"role": "user", "content": group_chat.build_user_message(
-                        recent, speaker, r["hero"], lang, hero_skipped=hero_skipped)}]
+                        recent, speaker, r["hero"], lang, hero_skipped=hero_skipped,
+                        length=length, avg=avg)}]
         opts = inf.to_options()
         # реплика короткая: без потолка модель иногда уходила в бесконечный повтор
-        # внутри JSON (минуты ожидания, «стена текста»); меньший лимит из Settings
-        # сохраняем
+        # внутри JSON (минуты ожидания, «стена текста»); потолок - по классу длины,
+        # меньший лимит из Settings сохраняем
         cur_np = opts.get("num_predict")
-        opts["num_predict"] = (min(cur_np, group_chat.MAX_TOKENS)
+        opts["num_predict"] = (min(cur_np, np_cap)
                                if isinstance(cur_np, int) and cur_np > 0
-                               else group_chat.MAX_TOKENS)
+                               else np_cap)
         if self._group.get("first"):
             # размер контекста проверяем на ПЕРВОЙ реплике цепочки (диалог выбора
             # без «сжать пример»: он завязан на режим «Диалог»)
@@ -3690,7 +3750,12 @@ class App(ctk.CTk):
         self._dyn_queues = [q for _c, q in targets]    # куда `_fold_segment` кладёт сводки
         allow_all = len(r["active"]) == 2        # при мьюте говорить можно только с героем
         group = {"speaker": speaker, "others": others, "lang": lang, "block": block,
-                 "targets": targets}
+                 "targets": targets, "length": length, "speech_cap": speech_cap,
+                 "action_cap": group_chat.action_limit(avg), "allow_all": allow_all}
+        # в Logs видно, какая длина выпала этому ходу (проверка рандома)
+        self.log_queue.put(self._fmt_log_entry(
+            f"GROUP: {speaker} - length {length} (speech <= {speech_cap} chars, "
+            f"num_predict {opts['num_predict']})", ""))
         av = self._photo_for(block) if inf.show_avatars else ""
         self.stop_event = threading.Event()
         self._set_generating(True)
@@ -3746,15 +3811,30 @@ class App(ctk.CTk):
         just = getattr(self, "_just_compressed", False)
         self._just_compressed = False
         ctx = inf.num_ctx
-        reserve = inf.num_predict if (inf.num_predict and inf.num_predict > 0) else 2048
-        need = estimate_tokens(messages) + reserve
+        # запас под ответ - РЕАЛЬНЫЙ лимит запроса (в «Группе» он 220-450, а не
+        # 2048 по умолчанию: из-за этого окно выскакивало при num_ctx 16384)
+        np_ = opts.get("num_predict") if isinstance(opts, dict) else None
+        if not (isinstance(np_, int) and np_ > 0):
+            np_ = inf.num_predict if (inf.num_predict and inf.num_predict > 0) else 2048
+        need = estimate_tokens(messages) + np_
         if ctx is not None and need <= int(ctx * 0.95):
             return None
         if ctx is None and need <= 4000:
             return None                  # маленький запрос - дефолта модели хватит
+        # уже выбрали «Отправить как есть» при этом num_ctx, и запрос с тех пор
+        # вырос не больше чем на 10% - не спрашиваем снова на каждой реплике
+        ok = getattr(self, "_ctx_proceed", None)
+        if ok and ok[0] == ctx and need <= ok[1] * 1.1:
+            return None
         suggested = next_num_ctx(need)
+        if ctx is not None and suggested <= ctx:
+            # оценка у самой границы: «поднять до 16384» при 16384 бессмысленно -
+            # предлагаем следующую ступень
+            suggested = next_num_ctx(ctx + 1)
         choice = self._ask_context_choice(need, ctx, suggested,
                                           allow_compress=allow_compress and not just)
+        if choice == "proceed":
+            self._ctx_proceed = (ctx, need)
         if choice == "increase":
             _kind, w = self._inf_widgets["num_ctx"]
             w.delete(0, "end")
@@ -4353,8 +4433,29 @@ class App(ctk.CTk):
         g_to = ""
         if structured:
             g_to, action, speech = _parse(full_reply)
+            if group is not None and not g_to:
+                # «все» или адресат не пришёл (ответ оборван): по обращению в
+                # тексте, иначе (поля не было) - тому, кто говорил последним;
+                # при мьюте говорить можно ТОЛЬКО с героем - «все» не бывает
+                guess = group_chat.guess_to(speech, group["others"], self.history,
+                                            use_last=not group_chat.has_to(full_reply))
+                if not guess and not group.get("allow_all", True) and group["others"]:
+                    guess = group["others"][0]
+                if guess:
+                    g_to = guess
+                    self.log_queue.put(self._fmt_log_entry(
+                        f"GROUP: addressee taken from the text - {guess}", ""))
             if group is not None:                   # без повторов предложений и не длиннее лимита
-                action, speech = group_chat.tidy_reply(action, speech)
+                # модель написала «сценарий» с подписанными репликами других
+                # участников - оставляем только слова говорящего
+                speech, cut_foreign = group_chat.cut_foreign_lines(
+                    speech, [group["speaker"]] + list(group["others"]))
+                if cut_foreign:
+                    self.log_queue.put(self._fmt_log_entry(
+                        "GROUP: lines of other participants cut from the reply", ""))
+                action, speech = group_chat.tidy_reply(
+                    action, speech, group.get("speech_cap") or group_chat.MAX_SPEECH_CHARS,
+                    group.get("action_cap") or group_chat.MAX_ACTION_CHARS)
             canon = "\n".join(p for p in (
                 f"*{action}*" if action else "", speech) if p)
             entry = {"role": "assistant", "content": canon}

@@ -794,8 +794,10 @@ GROUP_INSTRUCTIONS = (
     "отвечай живо, не растягивай реплики и не обрывай их на полуслове; не "
     "повторяй то, что уже сказали, а двигай сцену: реагируй на услышанное и "
     "добавляй новое. Каждого персонажа отыгрывай по его собственной карточке "
-    "(характер, манера речи) - голоса не должны сливаться. Реплика КОРОТКАЯ: "
-    "action - одно-два предложения, speech - до 3-5 предложений; никаких "
+    "(характер, манера речи) - голоса не должны сливаться. Реплики РАЗНОЙ "
+    "длины, как в живом разговоре: на короткую фразу - короткий ответ; какой "
+    "длины нужна эта реплика, сказано в задании хода в конце запроса - строго "
+    "соблюдай это. action - не больше одного-двух предложений; никаких "
     "повторов одних и тех же фраз."
 )
 GROUP_INSTRUCTIONS_EN = (
@@ -810,12 +812,14 @@ GROUP_INSTRUCTIONS_EN = (
     "vividly, do not drag the line out and do not cut it off mid-sentence; do "
     "not repeat what was already said, move the scene on: react to what you "
     "heard and add something new. Play each character by their own card "
-    "(personality, manner of speech) - the voices must not blend. Keep the line "
-    "SHORT: action - one or two sentences, speech - up to 3-5 sentences; no "
-    "repetition of the same phrases."
+    "(personality, manner of speech) - the voices must not blend. Lines VARY in "
+    "length, as in a live conversation: a short remark gets a short answer; how "
+    "long this line must be is stated in the turn assignment at the end of the "
+    "request - follow it strictly. action - no more than one or two sentences; "
+    "no repetition of the same phrases."
 )
 GROUP_FORMAT = (
-    "Формат ответа - JSON с тремя полями: \"to\" - кому адресована реплика: "
+    "Формат ответа - JSON с тремя полями: \"To\" - кому адресована реплика: "
     "имя одного из остальных участников (если обращаешься к конкретному "
     "человеку - ВСЕГДА указывай его имя) или «все» (только когда говоришь "
     "сразу всем); \"action\" - ТОЛЬКО то, что "
@@ -826,7 +830,7 @@ GROUP_FORMAT = (
     "текста вне JSON."
 )
 GROUP_FORMAT_EN = (
-    "The reply format is JSON with three fields: \"to\" - whom the line is "
+    "The reply format is JSON with three fields: \"To\" - whom the line is "
     "addressed to: the name of one of the other participants (when you speak "
     "to a specific person ALWAYS give their name) or \"all\" (only when you "
     "speak to everyone at once); "

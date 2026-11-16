@@ -12,6 +12,7 @@ HT = []
 PLAN = {}       # speaker -> список адресатов по очереди (to) ; "*" - по умолчанию
 DELAY = {"v": 0.0}
 RUNAWAY = {"on": False}
+OMIT_TO = {"on": False, "speech": ""}   # ответ без поля адресата (как оборванный до него)
 CAPS = ["completion", "tools"]
 
 
@@ -39,12 +40,14 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         sysm = p["messages"][0]["content"]; user = p["messages"][-1]["content"]
         fmt = p.get("format")
-        if isinstance(fmt, dict) and "to" in (fmt.get("properties") or {}):
+        props = (fmt.get("properties") or {}) if isinstance(fmt, dict) else {}
+        TK_ = "To" if "To" in props else "to"      # ключ адресата в схеме
+        if TK_ in props:
             m = re.search(r"Теперь ход: (.+?)\.", user)
             spk = m.group(1) if m else "?"
-            REQS.append({"speaker": spk, "system": sysm, "user": user, "enum": fmt["properties"]["to"]["enum"], "think": p.get("think"), "num_predict": (p.get("options") or {}).get("num_predict")})
+            REQS.append({"speaker": spk, "system": sysm, "user": user, "enum": props[TK_]["enum"], "think": p.get("think"), "num_predict": (p.get("options") or {}).get("num_predict")})
             if RUNAWAY["on"]:                       # бесконечный повтор ВНУТРИ JSON (как «стена текста» у пользователя)
-                head = '{"to": "%s", "action": "кланяется", "speech": "' % fmt["properties"]["to"]["enum"][0]
+                head = '{"%s": "%s", "action": "кланяется", "speech": "' % (TK_, props[TK_]["enum"][0])
                 chunks = [{"message": {"content": head}, "done": False}] + [{"message": {"content": "Да, Хозяин! Всегда Ваша, сэр! " * 3}, "done": False}] * 400
                 self._chunks(chunks, delay=0.002); return
             plan = PLAN.get(spk) or PLAN.get("*") or []
@@ -53,7 +56,11 @@ class H(BaseHTTPRequestHandler):
             import random
             words = "лес река камень ветер огонь дорога башня туман сад мост ночь звезда книга нож замок вино хлеб песок гроза тень".split()
             salt = " ".join(random.sample(words, 6)) + " " + str(random.randint(1000, 9999))
-            body = json.dumps({"to": to, "action": f"{spk} жестикулирует {idx}", "speech": f"{salt} - сказал {spk} для {to}."}, ensure_ascii=False)
+            obj = {TK_: to, "action": f"{spk} жестикулирует {idx}", "speech": f"{salt} - сказал {spk} для {to}."}
+            if OMIT_TO["on"]:
+                obj.pop(TK_); obj["speech"] = OMIT_TO["speech"] or obj["speech"]
+            # как настоящая Ollama: поля схемы - ПО АЛФАВИТУ (sort_keys)
+            body = json.dumps(obj, ensure_ascii=False, sort_keys=True)
             self._chunks([{"message": {"content": body}, "done": False}, {"done": True}], delay=DELAY["v"]); return
         if "important_changes" in sysm:
             HIDDEN.append("dyn"); HT.append(len(REQS))

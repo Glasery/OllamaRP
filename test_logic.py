@@ -1878,14 +1878,14 @@ def test_group_chat_logic():
 
     # схема и разбор
     sch = g.group_schema(["Виктар", "Лайрис"])
-    assert list(sch["properties"]) == ["to", "action", "speech"] and sch["required"] == ["to", "action", "speech"]
-    assert sch["properties"]["to"]["enum"] == ["Виктар", "Лайрис", "все"]
-    assert g.group_schema(["V"], "en")["properties"]["to"]["enum"] == ["V", "all"]
+    assert list(sch["properties"]) == [g.TO_KEY, "action", "speech"] and sch["required"] == [g.TO_KEY, "action", "speech"]
+    assert sch["properties"][g.TO_KEY]["enum"] == ["Виктар", "Лайрис", "все"]
+    assert g.group_schema(["V"], "en")["properties"][g.TO_KEY]["enum"] == ["V", "all"]
     others = ["Виктар", "Лайрис"]
     assert g.normalize_to("лайрис", others) == "Лайрис" and g.normalize_to("ВСЕ", others) == ""
     assert g.normalize_to("All", others) == "" and g.normalize_to("Кто-то", others) == "" and g.normalize_to(None, others) == ""
     assert g.parse_reply('{"to": "виктар", "action": "кивает", "speech": "Привет"}', others) == ("Виктар", "кивает", "Привет")
-    assert g.parse_reply('{"to": "Лайрис", "action": "a", "speech": "обор', others) == ("Лайрис", "a", "обор")   # оборванный
+    assert g.parse_reply('{"to": "Лайрис", "action": "a", "speech": "обор', others) == ("Лайрис", "a", "обор…")   # оборванный: недописано -> «…»
     assert g.parse_reply("просто текст", others) == ("", "", "просто текст")
     assert g.parse_reply('```json\n{"to": "все", "action": "", "speech": "x"}\n```', others) == ("", "", "x")
     assert g.parse_reply('{"to": 5, "action": ["a"], "speech": null}', others) == ("", "", "")
@@ -1932,7 +1932,7 @@ def test_group_system_prompt_and_digest_labels():
     sp = pb.build_group_system_prompt([a, b], hero, Environment(location="бар"), Scenario(base_scenario="вечер"),
                                       SystemConfig(content="Правила"), "доп", "ru")
     for need in ("Ксана / Лайрис", "Виктар", "молчаливый наблюдатель", "Правила", "поцелуй", "старый долг",
-                 "стервозная", "надменная", "наёмник", "бар", "вечер", "доп", '"to"', '"action"', '"speech"',
+                 "стервозная", "надменная", "наёмник", "бар", "вечер", "доп", '"To"', '"action"', '"speech"',
                  "НЕ знает чужих мыслей", "без мыслей и чувств"):
         assert need in sp, need
     assert sp.startswith("Правила")                                     # конфиг-промпт - первым
@@ -2034,8 +2034,8 @@ def test_group_reply_limits_and_solo_schema():
     assert g.tidy_reply("жест", "Привет!") == ("жест", "Привет!")
     assert g.MAX_TOKENS == 600 and g.STREAM_CHAR_GUARD > g.MAX_SPEECH_CHARS + g.MAX_ACTION_CHARS
     # схема при мьюте: только герой, без «все»
-    assert g.group_schema(["Виктар"], allow_all=False)["properties"]["to"]["enum"] == ["Виктар"]
-    assert g.group_schema(["Виктар", "Лайрис"])["properties"]["to"]["enum"] == ["Виктар", "Лайрис", "все"]
+    assert g.group_schema(["Виктар"], allow_all=False)["properties"][g.TO_KEY]["enum"] == ["Виктар"]
+    assert g.group_schema(["Виктар", "Лайрис"])["properties"][g.TO_KEY]["enum"] == ["Виктар", "Лайрис", "все"]
     # оборванный ответ-«стена» после обрыва стрима разбирается и подрезается
     part = '{"to": "Виктар", "action": "кланяется", "speech": "' + "Да, Хозяин! Всегда Ваша, сэр! " * 50
     to, act, speech = g.parse_reply(part, ["Виктар"])
@@ -2045,9 +2045,175 @@ def test_group_reply_limits_and_solo_schema():
     two = pb.build_group_system_prompt([Character(name="Шелти"), Character(name="Лайрис")],
                                        Protagonist(name="Виктар"), lang="ru")
     assert "обращайся только к герою" in one and "обращайся только к герою" not in two
-    assert "Реплика КОРОТКАЯ" in two and "ВСЕГДА указывай его имя" in two
+    assert "Реплики РАЗНОЙ длины" in two and "ВСЕГДА указывай его имя" in two
+    assert "VARY in length" in pb.build_group_system_prompt(
+        [Character(name="S"), Character(name="L")], Protagonist(name="V"), lang="en")
     assert "only to the protagonist" in pb.build_group_system_prompt(
         [Character(name="S")], Protagonist(name="V"), lang="en")
+
+
+def test_group_reply_length():
+    """«Группа»: длина реплики случайная на каждый ход (короткая/средняя/
+    развёрнутая), после короткой реплики чаще короткий ответ, одна и та же
+    «простыня» от одного голоса два раза подряд не выпадает; класс длины
+    уходит в конец запроса и задаёт потолки речи и num_predict."""
+    import random
+    import group_chat as g
+    rng = random.Random(1)
+    long_line = {"role": "assistant", "speaker": "Шелти", "to": "",
+                 "content": "*стоит*\n" + "Длинная фраза с уникальным текстом номер. " * 30}
+    short_line = {"role": "user", "speaker": "Виктар", "to": "", "content": "Ну?"}
+    # пустая сцена: встречаются все три класса, средний потолок примерно вдвое ниже прежних 900
+    picks = [g.pick_length([], "Шелти", rng) for _ in range(2000)]
+    assert set(picks) == set(g.LENGTHS)
+    avg = sum(g.length_limits(p)[0] for p in picks) / len(picks)
+    assert 280 < avg < 400, avg            # ~340: втрое короче прежних 900
+    # после короткой реплики короткий ответ - самый частый
+    after_short = [g.pick_length([short_line], "Лайрис", rng) for _ in range(2000)]
+    assert after_short.count("short") > after_short.count("medium") > after_short.count("long")
+    # Шелти только что выдала «простыню» - длинной снова не будет (у Лайрис - может)
+    hist = [long_line, {"role": "assistant", "speaker": "Лайрис", "to": "", "content": "Ага. " * 60}]
+    assert "long" not in {g.pick_length(hist, "Шелти", rng) for _ in range(500)}
+    assert "long" in {g.pick_length([long_line], "Лайрис", rng) for _ in range(500)}
+    # потолки
+    assert g.length_limits("short")[0] < g.length_limits("medium")[0] < g.length_limits("long")[0]
+    assert g.length_limits("long")[0] == g.MAX_SPEECH_CHARS <= 550
+    assert g.length_limits("???") == g.length_limits("long")             # неизвестный - как развёрнутая
+    assert all(np <= g.MAX_TOKENS for _c, np in g.LENGTHS.values())
+    # указание в конце запроса (RU/EN), без класса - как раньше
+    um = g.build_user_message([short_line], "Шелти", "Виктар", length="short")
+    assert um.rstrip().endswith("отвечай ещё короче.") and "КОРОТКАЯ" in um
+    assert um.index("Теперь ход") < um.index("КОРОТКАЯ")
+    assert "LONGER" in g.build_user_message([], "S", "V", "en", length="long")
+    assert "Длина этой реплики" not in g.build_user_message([short_line], "Шелти", "Виктар")
+    # подрезка речи по классу: не длиннее потолка, но и не больше общего максимума
+    text = " ".join(f"Предложение {i} с уникальным текстом." for i in range(80))
+    assert len(g.tidy_reply("", text, 300)[1]) <= 300
+    assert len(g.tidy_reply("", text * 3, 5000)[1]) <= g.HARD_SPEECH_CHARS
+    assert len(g.tidy_reply("", text, 0)[1]) <= g.MAX_SPEECH_CHARS
+
+
+def test_group_reply_len_slider():
+    """«Группа»: ползунок «Средняя длина реплики» (150..900, по умолчанию 340).
+    Все потолки (речь, действие, num_predict) и число предложений в задании
+    хода масштабируются от него; средний потолок речи ~ значению ползунка;
+    значение хранится в settings.json и чистится от мусора."""
+    import random
+    import group_chat as g
+    from models import InferenceConfig
+    assert g.clamp_reply_len(None) == g.clamp_reply_len("x") == g.clamp_reply_len(True) == 340
+    assert g.clamp_reply_len(10) == 150 and g.clamp_reply_len(10**6) == 900
+    assert g.clamp_reply_len("600") == 600 and g.clamp_reply_len(455.6) == 456
+    # по умолчанию - прежняя таблица
+    assert {k: g.length_limits(k, 340) for k in g.LENGTHS} == g.LENGTHS
+    assert g.LENGTHS["short"][0] == 200 and g.LENGTHS["long"][0] == 550
+    rng = random.Random(3)
+    for avg in (150, 340, 600, 900):
+        caps = [g.length_limits(k, avg)[0] for k in ("short", "medium", "long")]
+        assert caps == sorted(caps)
+        picks = [g.pick_length([], "A", rng, avg=avg) for _ in range(3000)]
+        mean = sum(g.length_limits(p, avg)[0] for p in picks) / len(picks)
+        assert abs(mean - avg) < avg * 0.12, (avg, mean)            # средний потолок ~ ползунку
+    # больше ползунок - больше всё
+    lo, hi = g.length_limits("medium", 200), g.length_limits("medium", 800)
+    assert lo[0] < hi[0] and lo[1] < hi[1]
+    assert g.action_limit(150) == 150 and g.action_limit(900) == 700
+    assert g.action_limit(340) < g.action_limit(600)
+    # задание хода: число предложений растёт с ползунком, падежи
+    assert "не больше 1 предложения" in g.length_text("short", "ru", 150)
+    assert "не больше 6 предложений" in g.length_text("long", "ru", 340)
+    assert "не больше 15 предложений" in g.length_text("long", "ru", 900)
+    assert "no more than 1 sentence " in g.length_text("short", "en", 150)
+    um = g.build_user_message([], "A", "B", length="long", avg=900)
+    assert "не больше 15 предложений" in um
+    # «простыня» подряд - порог тоже от ползунка: 600 символов длинно при 340, но не при 900
+    line = {"speaker": "A", "content": "Фраза номер с уникальным текстом. " * 18}   # ~600
+    assert "long" not in {g.pick_length([line], "A", rng, avg=340) for _ in range(400)}
+    assert "long" in {g.pick_length([line], "A", rng, avg=900) for _ in range(400)}
+    # подрезка действия по ползунку
+    act = " ".join(f"Жест {i} персонажа." for i in range(100))
+    assert len(g.tidy_reply(act, "", 300, g.action_limit(150))[0]) <= 150
+    assert len(g.tidy_reply(act, "", 300, g.action_limit(900))[0]) <= 700
+    # settings.json
+    assert InferenceConfig().group_reply_len == 340
+    assert InferenceConfig.from_dict({}).group_reply_len == 340            # старый settings.json
+    assert InferenceConfig.from_dict({"group_reply_len": 600}).group_reply_len == 600
+    assert InferenceConfig.from_dict({"group_reply_len": "мусор"}).group_reply_len == 340
+    assert InferenceConfig.from_dict({"group_reply_len": 5}).group_reply_len == 150
+    assert "group_reply_len" not in InferenceConfig(group_reply_len=500).to_options()
+
+
+def test_group_foreign_lines_and_truncation():
+    """«Группа»: модель пишет в speech «сценарий» с подписанными репликами
+    других (`Собака: «Да, Хозяин!» — Шелти`) - режем до этого места; обычные
+    цитаты/обращения не трогаем. Ответ оборван лимитом - недописанное
+    предложение убирается. В задании хода - запрет писать чужие реплики."""
+    import group_chat as g
+    names = ["Лайрис", "Виктар Велес", "Шелти"]
+    s = ("Шелти, ты получишь право наказать меня. Это ясно для тебя, собачка?. "
+         "Собака: «Да, Хозяин!» — Шелти. Я не доверяю её подчинению. "
+         "Собака: «Я выполняю приказы!» — Лайрис. Теперь, если ты сможешь.")
+    assert g.cut_foreign_lines(s, names) == (
+        "Шелти, ты получишь право наказать меня. Это ясно для тебя, собачка?.", True)
+    assert g.cut_foreign_lines("Слушай. Шелти: «Я тут» и всё.", names) == ("Слушай.", True)
+    assert g.cut_foreign_lines("Шелти, ты слышишь? Виктар Велес: «Стоять!»", names) == (
+        "Шелти, ты слышишь?", True)
+    assert g.cut_foreign_lines("Ну. Виктар → Шелти: стой.", names) == ("Ну.", True)
+    for keep in ("Повторяй: «Да, Хозяин». Громче!",        # приказ с цитатой - не подпись
+                 "Он сказал: «Иди» — и ушёл.",              # после тире - не имя
+                 "Шелти, иди сюда. Виктар ждёт.",            # обращения по имени
+                 "Ты — Шелти, а я нет.",
+                 "«Да, Хозяин!» — Шелти.",                  # иначе пришлось бы стереть всё
+                 ""):
+        assert g.cut_foreign_lines(keep, names) == (keep, False), keep
+    # недописанный хвост
+    assert g.drop_unfinished_tail("Боль будет сильнее. Крик") == "Боль будет сильнее."
+    assert g.drop_unfinished_tail("Он сказал «Иди.» потом") == "Он сказал «Иди.»"
+    assert g.drop_unfinished_tail("Ну давай") == "Ну давай…"
+    assert g.drop_unfinished_tail("Всё сказано!") == "Всё сказано!"
+    # только для ОБОРВАННОГО JSON; целый ответ без точки в конце не трогаем
+    assert g.parse_reply('{"to": "все", "action": "a", "speech": "Раз. Два три. Крик',
+                         ["Шелти"]) == ("", "a", "Раз. Два три.")
+    assert g.parse_reply('{"to": "все", "action": "a", "speech": "Раз. Крик"}',
+                         ["Шелти"]) == ("", "a", "Раз. Крик")
+    assert g.parse_reply('{"to": "Шелти", "action": "встаёт. Поднима',
+                         ["Шелти"]) == ("Шелти", "встаёт.", "")
+    # запрет в задании хода (RU/EN)
+    assert "никаких чужих реплик" in g.build_user_message([], "Лайрис", "Виктар")
+    assert "no lines or quotes of others" in g.build_user_message([], "L", "V", "en")
+
+
+def test_group_addressee_key_and_guess():
+    """«Группа»: Ollama выдаёт поля схемы ПО АЛФАВИТУ - ключ адресата "To"
+    (заглавная) идёт раньше action/speech и не теряется при обрыве ответа.
+    Адресата нет / «все» - угадываем по обращению в тексте, иначе (поля не
+    было) - отвечают последнему говорившему."""
+    import json
+    import group_chat as g
+    sch = g.group_schema(["Виктар", "Лайрис"])
+    assert sorted(sch["properties"])[0] == g.TO_KEY == "To"          # первый по алфавиту (байтам)
+    assert sch["required"][0] == g.TO_KEY
+    others = ["Виктар Велес", "Лайрис"]
+    # новый ключ и старый - оба понимаются, в т.ч. в оборванном JSON
+    assert g.parse_reply(json.dumps({"To": "Лайрис", "action": "a", "speech": "b"}), others)[0] == "Лайрис"
+    assert g.parse_reply('{"to": "Лайрис", "action": "a", "speech": "b"}', others)[0] == "Лайрис"
+    assert g.parse_reply('{"To": "Виктар Велес", "action": "кив', others) == ("Виктар Велес", "кив…", "")
+    # has_to: было ли поле адресата
+    assert g.has_to('{"To": "все", "action": ""}') and g.has_to('{"to": "X"}')
+    assert not g.has_to('{"action": "a", "speech": "b') and not g.has_to('{"To": ""}')
+    hist = [{"speaker": "Виктар Велес", "to": "Шелти", "content": "x"},
+            {"speaker": "Лайрис", "to": "", "content": "y"}]
+    # обращение по имени (самое раннее), в т.ч. по первому слову имени
+    assert g.guess_to("Лайрис, ты знаешь, что Хозяин требует?", others, hist) == "Лайрис"
+    assert g.guess_to("Ты слышишь, Виктар? А Лайрис молчит.", others, hist) == "Виктар Велес"
+    assert g.guess_to("Хорошо, Лайрис! И ты, Виктар!", others, hist) == "Лайрис"
+    # имя без обращения - не адресат; поля не было - последнему говорившему
+    assert g.guess_to("Я знаю, что Виктар не обманывает.", others, hist) == "Лайрис"
+    assert g.guess_to("Я знаю, что Виктар не обманывает.", others, hist, use_last=False) == ""
+    assert g.guess_to("Да.", ["Виктар Велес"], hist[:1]) == "Виктар Велес"   # мьют: последним говорил герой
+    assert g.guess_to("Да.", ["Виктар Велес"], hist) == ""   # (героя при мьюте подставляет gui)
+    assert g.guess_to("Да.", others, []) == ""
+    assert g.guess_to("Да.", others, [{"speaker": "Шелти"}]) == ""         # последним говорил не из others
 
 
 def test_stall_timeout_config():

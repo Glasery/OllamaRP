@@ -180,7 +180,7 @@ def normalize_messages(messages: list) -> list:
     return out
 
 
-_PARTIAL_FIELD = re.compile(r'"(action|speech|to)"\s*:\s*"((?:[^"\\]|\\.)*)', re.S)
+_PARTIAL_FIELD = re.compile(r'"(action|speech|to|To)"\s*:\s*"((?:[^"\\]|\\.)*)', re.S)
 
 
 def _partial_json_fields(text: str):
