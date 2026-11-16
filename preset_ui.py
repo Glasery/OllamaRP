@@ -288,7 +288,8 @@ class PresetEditDialog(_ModalToplevel):
     def _save(self):
         values = {attr: self._value(attr) for attr, _, _ in self.spec["fields"]}
         if self.spec.get("dynamic_memory"):
-            values["dyn_enabled"] = bool(self._dyn_var.get())
+            values["dyn_enabled"] = self._dyn_state != "off"
+            values["dyn_readonly"] = self._dyn_state == "read"
             values["dyn_memory"] = self._dyn_text_to_save()
             values["dyn_prompt"] = self._dyn_prompt
         if self.spec.get("photo") and self._store is not None:
@@ -308,10 +309,15 @@ class PresetEditDialog(_ModalToplevel):
     # --- динамическая память (только персонаж-собеседник) -------------------
     def _build_dynamic_memory(self, frame, obj):
         self._dyn_initial = (getattr(obj, "dyn_memory", "") or "") if obj is not None else ""
-        self._dyn_var = tk.BooleanVar(
-            value=bool(getattr(obj, "dyn_enabled", False)) if obj is not None else False)
-        ctk.CTkCheckBox(frame, text=t("dyn_enable"), variable=self._dyn_var).pack(
-            anchor="w", pady=(PAD_SEC, PAD_TIGHT))
+        # три состояния: Выкл / Чтение (в промпт идёт, не обновляется) / Обновление
+        self._dyn_state = dynamic_memory.dyn_state(obj) if obj is not None else "off"
+        ctk.CTkLabel(frame, text=t("dyn_enable"), anchor="w").pack(
+            fill="x", pady=(PAD_SEC, PAD_TIGHT))
+        self._dyn_seg = ctk.CTkSegmentedButton(
+            frame, values=[t(f"dyn_state_{st}") for st in dynamic_memory.STATES],
+            command=self._on_dyn_seg)
+        self._dyn_seg.set(t(f"dyn_state_{self._dyn_state}"))
+        self._dyn_seg.pack(anchor="w", pady=(0, PAD_TIGHT))
         ctk.CTkLabel(frame, text=t("dyn_hint"), anchor="w",
                      justify="left", wraplength=470, text_color="gray",
                      font=ctk.CTkFont(size=11)).pack(fill="x")
@@ -345,6 +351,10 @@ class PresetEditDialog(_ModalToplevel):
             return
         new = dlg.result.strip()
         self._dyn_prompt = "" if (not new or new in dynamic_memory.builtin_rules()) else new
+
+    def _on_dyn_seg(self, label):
+        self._dyn_state = next((st for st in dynamic_memory.STATES
+                                if t(f"dyn_state_{st}") == label), "off")
 
     def _dyn_text_to_save(self) -> str:
         """Текст динамической памяти для сохранения. Приложение обновляет её

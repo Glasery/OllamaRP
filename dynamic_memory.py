@@ -501,3 +501,24 @@ def interpret_reply(reply, current: str, limit: int = DYN_MEMORY_LIMIT, lang: st
             and len(new) < len(cur_norm) * SHRINK_GUARD_RATIO):
         return "same", cur                                # память не должна «усыхать» без причины
     return "changed", new
+
+
+# ------------------------------------------------- три состояния памяти ----
+# off - не используется вовсе; read - в промпт персонажа идёт, но НЕ обновляется
+# (удобно пробовать сцену, не засоряя память); update - читается и обновляется.
+STATES = ("off", "read", "update")
+
+
+def dyn_state(char) -> str:
+    """Состояние динамической памяти персонажа из его полей."""
+    if char is None or not getattr(char, "dyn_enabled", False):
+        return "off"
+    return "read" if getattr(char, "dyn_readonly", False) else "update"
+
+
+def set_state(char, state: str) -> None:
+    """Записать состояние в поля персонажа (dyn_enabled + dyn_readonly)."""
+    if state not in STATES:
+        state = "off"
+    char.dyn_enabled = state != "off"
+    char.dyn_readonly = state == "read"

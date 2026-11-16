@@ -19,7 +19,8 @@ GUI, здесь перечислены все блоки как есть.
 """
 from models import Character, Protagonist, Environment, Scenario, SystemConfig
 
-BLOCK_ORDER = ("protagonist", "character", "environment", "scenario", "system_config")
+BLOCK_ORDER = ("protagonist", "character", "character2", "environment", "scenario",
+               "system_config")
 
 BLOCK_SPECS = {
     "protagonist": {
@@ -150,10 +151,20 @@ BLOCK_SPECS = {
     },
 }
 
+# ВТОРОЙ персонаж режима «Группа»: те же данные, хранилище и форма, что у
+# "character" (общий список пресетов), но отдельный выбор в сцене. Без
+# "seed"/"seed_en": стартовые примеры создаются только по "character".
+BLOCK_SPECS["character2"] = {
+    **{k: v for k, v in BLOCK_SPECS["character"].items()
+       if k not in ("seed", "seed_en", "title")},
+    "title": "Второй персонаж",
+}
+
 # Короткие подписи для строки активных пресетов над чатом.
 SHORT_LABELS = {
     "protagonist": "Вы",
     "character": "Персонаж",
+    "character2": "Второй персонаж",
     "environment": "Локация",
     "scenario": "Сценарий",
     "system_config": "Конфигурация",

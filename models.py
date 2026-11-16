@@ -11,6 +11,7 @@ from typing import Optional
 import uuid
 
 from dynamic_memory import DYN_MEMORY_LIMIT, clamp_limit
+from group_chat import AUTO_TURNS_DEFAULT, clamp_turns
 
 
 def _new_id() -> str:
@@ -57,6 +58,8 @@ class Character:
     # Фото в промпт модели НЕ попадают.
     dyn_enabled: bool = False    # ДИНАМИЧЕСКАЯ ПАМЯТЬ включена (только у собеседника;
                                   # см. dynamic_memory.py)
+    dyn_readonly: bool = False   # динамическая память только ЧИТАЕТСЯ (в промпт идёт, но не обновляется);
+                                  # три состояния: выкл (dyn_enabled=False) / чтение / чтение+обновление
     dyn_prompt: str = ""         # СВОИ правила для модели, обновляющей эту память ("" -> стандартные,
                                   # см. dynamic_memory.DYN_RULES); формат ответа добавляется всегда
     dyn_memory: str = ""         # её текст: самое важное, что с персонажем случилось;
@@ -73,6 +76,7 @@ class Character:
         kwargs["id"] = _id(d.get("id"))
         kwargs["dyn_enabled"] = d.get("dyn_enabled") is True
         kwargs["dyn_prompt"] = _s(d.get("dyn_prompt"))
+        kwargs["dyn_readonly"] = d.get("dyn_readonly") is True
         kwargs["dyn_memory"] = _s(d.get("dyn_memory")) if isinstance(d.get("dyn_memory"), str) else ""
         kwargs["gallery"] = _str_list(d.get("gallery"))
         kwargs["emotes"] = _str_list(d.get("emotes"))
@@ -232,6 +236,7 @@ class InferenceConfig:
     show_avatars: bool = True           # АВАТАРЫ: фото рядом с репликами в чате (диалог)
     show_gallery: bool = True           # ГАЛЕРЕЯ: вкладки «Фото» в боковых панелях (диалог)
     show_emotes: bool = False           # ЭМОТИКОНЫ поверх интерфейса (экспериментально, Windows)
+    group_turns: Optional[int] = AUTO_TURNS_DEFAULT  # лимит реплик автодиалога (режим «Группа»)
     emotes_mode: str = "all"            # UI: кнопка вверху - "all" / "companion" (только
                                         # собеседник) / "hidden" (свёрнуты)
     dyn_memory_limit: Optional[int] = DYN_MEMORY_LIMIT  # предел динамической памяти, симв.
@@ -317,6 +322,7 @@ class InferenceConfig:
             show_gallery=sg if isinstance(sg, bool) else True,
             show_emotes=se if isinstance(se, bool) else False,
             emotes_mode=em,
+            group_turns=clamp_turns(d.get("group_turns")),
             dyn_memory_limit=clamp_limit(d.get("dyn_memory_limit")),
             last_model=d.get("last_model") if isinstance(d.get("last_model"), str) else "",
         )

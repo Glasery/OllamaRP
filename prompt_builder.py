@@ -293,10 +293,14 @@ def digest_system(lang="ru") -> str:
 
 def _convo(entries: list, en: bool) -> str:
     u_pre, a_pre = ("User: ", "Assistant: ") if en else ("Пользователь: ", "Ассистент: ")
-    return "\n".join(
-        (u_pre if m.get("role") == "user" else a_pre) + (m.get("content") or "")
-        for m in entries
-    )
+
+    def _pre(m):
+        who = (m.get("speaker") or "").strip()      # режим «Группа»: подписываем по имени
+        if who:
+            to = (m.get("to") or "").strip()
+            return f"{who} → {to}: " if to else f"{who}: "
+        return u_pre if m.get("role") == "user" else a_pre
+    return "\n".join(_pre(m) + (m.get("content") or "") for m in entries)
 
 
 def build_digest_messages(old_digest: str, entries: list,
@@ -778,6 +782,109 @@ def build_system_prompt(character: "Optional[Character]" = None,
     return "\n".join(parts)
 
 
+# --- режим «Группа»: два персонажа + герой-наблюдатель (см. group_chat.py) ----
+GROUP_INSTRUCTIONS = (
+    "Ты ведёшь групповую сцену в текстовом ролплее. В ней участвуют персонажи "
+    "{chars}{hero_part}. Каждый раз тебе сообщают, ЧЕЙ ход сейчас, и ты пишешь "
+    "реплику ТОЛЬКО за этого персонажа: никогда не пиши слова, мысли и действия "
+    "другого персонажа или героя. Реплики остальных участников приходят в "
+    "стенограмме в виде «Имя → Кому: *действие* речь». Персонаж слышит всё, что "
+    "сказано вслух, и видит всё, что делают другие, но НЕ знает чужих мыслей и "
+    "чувств - только то, что видно и слышно. Учитывай окружение и ситуацию; "
+    "отвечай живо, не растягивай реплики и не обрывай их на полуслове; не "
+    "повторяй то, что уже сказали, а двигай сцену: реагируй на услышанное и "
+    "добавляй новое. Каждого персонажа отыгрывай по его собственной карточке "
+    "(характер, манера речи) - голоса не должны сливаться. Реплика КОРОТКАЯ: "
+    "action - одно-два предложения, speech - до 3-5 предложений; никаких "
+    "повторов одних и тех же фраз."
+)
+GROUP_INSTRUCTIONS_EN = (
+    "You run a group scene in a text roleplay. The participants are the "
+    "characters {chars}{hero_part}. Each time you are told WHOSE turn it is, and "
+    "you write the line ONLY for that character: never write the words, thoughts "
+    "or actions of another character or of the protagonist. The other "
+    "participants' lines arrive in the transcript as \"Name → To: *action* "
+    "speech\". A character hears everything said aloud and sees everything the "
+    "others do, but does NOT know their thoughts and feelings - only what can be "
+    "seen and heard. Take the setting and the situation into account; reply "
+    "vividly, do not drag the line out and do not cut it off mid-sentence; do "
+    "not repeat what was already said, move the scene on: react to what you "
+    "heard and add something new. Play each character by their own card "
+    "(personality, manner of speech) - the voices must not blend. Keep the line "
+    "SHORT: action - one or two sentences, speech - up to 3-5 sentences; no "
+    "repetition of the same phrases."
+)
+GROUP_FORMAT = (
+    "Формат ответа - JSON с тремя полями: \"to\" - кому адресована реплика: "
+    "имя одного из остальных участников (если обращаешься к конкретному "
+    "человеку - ВСЕГДА указывай его имя) или «все» (только когда говоришь "
+    "сразу всем); \"action\" - ТОЛЬКО то, что "
+    "персонаж делает и что видят остальные (поза, жесты, мимика, движения), от "
+    "третьего лица, без мыслей и чувств, которых окружающие не могут "
+    "наблюдать; \"speech\" - только прямая речь персонажа, которую слышат все "
+    "присутствующие. action и speech могут быть пустыми строками. Никакого "
+    "текста вне JSON."
+)
+GROUP_FORMAT_EN = (
+    "The reply format is JSON with three fields: \"to\" - whom the line is "
+    "addressed to: the name of one of the other participants (when you speak "
+    "to a specific person ALWAYS give their name) or \"all\" (only when you "
+    "speak to everyone at once); "
+    "\"action\" - ONLY what the character does and what the others can see "
+    "(posture, gestures, facial expression, movement), in the third person, with "
+    "no thoughts or feelings the others cannot observe; \"speech\" - only the "
+    "character's direct speech, heard by everyone present. action and speech "
+    "may be empty strings. No text outside the JSON."
+)
+
+
+def build_group_system_prompt(characters: list, protagonist: "Optional[Protagonist]" = None,
+                              environment: "Optional[Environment]" = None,
+                              scenario: "Optional[Scenario]" = None,
+                              system_config: "Optional[SystemConfig]" = None,
+                              extra_details: str = "", lang: str = "ru") -> str:
+    """ОБЩИЙ system-промпт группового режима: одинаков для ВСЕХ говорящих (чтобы
+    Ollama переиспользовала кэш промпта), «чей ход» - в конце запроса, см.
+    group_chat.build_user_message. Герой - молчаливый наблюдатель."""
+    en = _is_en(lang)
+    names = [c.name.strip() for c in characters if c.name and c.name.strip()]
+    chars = " / ".join(names) if names else ("(unnamed)" if en else "(без имён)")
+    hero = (protagonist.name or "").strip() if protagonist is not None else ""
+    if hero:
+        hero_part = (f" and the protagonist {hero} - a silent observer controlled by "
+                     "the user, present in the scene; he speaks only when his line "
+                     "appears in the transcript" if en else
+                     f" и главный герой {hero} - молчаливый наблюдатель, которым "
+                     "управляет пользователь; он присутствует в сцене и говорит "
+                     "только тогда, когда в стенограмме появляется его реплика")
+    else:
+        hero_part = ""
+    head = (GROUP_INSTRUCTIONS_EN if en else GROUP_INSTRUCTIONS).format(
+        chars=chars, hero_part=hero_part)
+    if len(names) == 1:                      # второй персонаж заглушён: в сцене только этот
+        head += (" Right now there is no other character in the scene: speak only "
+                 "to the protagonist." if en else
+                 " Сейчас в сцене нет других персонажей: обращайся только к герою.")
+    parts: List[str] = []
+    if system_config is not None and system_config.content.strip():
+        parts += [system_config.content.strip(), ""]
+    parts += [head, "", LANGUAGE_RULE_EN if en else LANGUAGE_RULE, "",
+              GROUP_FORMAT_EN if en else GROUP_FORMAT]
+    if _protagonist_has_content(protagonist):
+        parts += ["", _protagonist_block(protagonist, lang=lang)]
+    for c in characters:
+        parts += ["", _character_block(c, lang=lang)]
+    if environment is not None:
+        parts += ["", _environment_block(environment, lang=lang)]
+    if scenario is not None:
+        parts += ["", _scenario_block(scenario, lang=lang)]
+    if extra_details.strip():
+        parts += ["", "## Additional details" if en else "## Дополнительные детали",
+                  extra_details.strip()]
+    parts += ["", LANGUAGE_REMINDER_EN if en else LANGUAGE_REMINDER]
+    return "\n".join(parts)
+
+
 # --- кнопка «Сгенерировать» в редакторе пресета ------------------------------
 # Короткое вступление по типу блока: чем «занят» помощник, когда придумывает
 # значение одного поля карточки.
@@ -785,6 +892,7 @@ _FIELD_GEN_INTRO = {
     "protagonist": "Ты придумываешь детали для карточки главного героя "
                    "(им управляет игрок) в текстовом ролплее.",
     "character": "Ты придумываешь детали для карточки персонажа в текстовом ролплее.",
+    "character2": "Ты придумываешь детали для карточки персонажа в текстовом ролплее.",
     "environment": "Ты придумываешь детали обстановки/локации для текстового ролплея.",
     "scenario": "Ты придумываешь детали завязки сценария для текстового ролплея.",
     "system_config": "Ты формулируешь общие правила поведения модели для "
@@ -796,6 +904,7 @@ _FIELD_GEN_INTRO_EN = {
     "protagonist": "You invent details for the protagonist's card "
                    "(controlled by the player) in a text roleplay.",
     "character": "You invent details for a character's card in a text roleplay.",
+    "character2": "You invent details for a character's card in a text roleplay.",
     "environment": "You invent details of the setting/location for a text roleplay.",
     "scenario": "You invent details of the scenario's setup for a text roleplay.",
     "system_config": "You state general rules for the model's behaviour in a "

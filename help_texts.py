@@ -420,6 +420,20 @@ _FAQ_RU = [
           "сохранение не входят. Файлы лежат в папке sessions рядом с "
           "пресетами."),
 
+    ("q", "Что такое режим «Группа»?"),
+    ("p", "Экспериментальная вкладка рядом с «Диалог / История / Чат». В сцене два "
+          "персонажа (выберите «Персонаж» и «Второй персонаж») и вы — молчаливый "
+          "наблюдатель. Персонажи говорят друг с другом сами: «▶ Авто» — до лимита "
+          "реплик, «‖ Пауза» — остановить после текущей, «» Шаг» — одна реплика. "
+          "Чтобы вмешаться, наберите реплику, выберите «Кому» (персонаж или «Всем») и "
+          "нажмите «Отправить»: она встанет сразу после текущей. Если персонаж "
+          "обратился к вам, автодиалог ждёт: ответьте или нажмите «▶ Авто» / «» Шаг». "
+          "Динамическую память каждого персонажа можно включить, выключить или оставить "
+          "только на чтение прямо под выбором персонажа. Имена обоих персонажей и героя "
+          "должны различаться. Переключатель «Заглушить» под персонажем "
+          "временно убирает его из сцены: герой общается только со вторым, "
+          "автодиалог недоступен, пока кто-то заглушён."),
+
     ("q", "Что такое динамическая память персонажа?"),
     ("p", "Галка в «Настроить» у персонажа (только собеседник). Приложение "
           "само ведёт краткий список самого важного, что с персонажем "
@@ -629,6 +643,20 @@ _FAQ_EN = [
           "a save, “Delete” removes it. Loading replaces the current dialogue "
           "(save it first if you need it). Logs and Settings are not part of a "
           "save. Files live in a sessions folder next to the presets."),
+
+    ("q", "What is the “Group” mode?"),
+    ("p", "An experimental tab next to “Dialogue / Story / Chat”. The scene has two "
+          "characters (pick “Character” and “Second character”) and you as a silent "
+          "observer. The characters talk to each other by themselves: “▶ Auto” — up to "
+          "the line limit, “‖ Pause” — stop after the current line, “» Step” — one line. "
+          "To step in, type a line, choose “To” (a character or “Everyone”) and press "
+          "“Send”: it goes in right after the current line. If a character addresses you, "
+          "the auto-dialogue waits: answer or press “▶ Auto” / “» Step”. Each character's "
+          "dynamic memory can be on, off or read-only right under the character picker. "
+          "The names of both characters and the hero must differ. The “Mute” switch "
+          "under a character temporarily removes them from the scene: the hero talks "
+          "only to the other one, and the auto-dialogue is unavailable while someone "
+          "is muted."),
 
     ("q", "What is a character's dynamic memory?"),
     ("p", "A checkbox in “Manage” of a character (companions only). The app "

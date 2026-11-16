@@ -114,7 +114,7 @@ class SessionStore:
 
 
 # ---- нормализация снимка перед применением ----
-_MODES = ("dialogue", "story", "chat")
+_MODES = ("dialogue", "story", "chat", "group")
 
 
 def _str(v) -> str:
@@ -134,10 +134,15 @@ def normalize_snapshot(d, max_dyn_new: int = 8) -> dict:
     загрузку посередине, оставив диалог наполовину загруженным. Лишнее/
     непонятное отбрасывается, индексы зажимаются в допустимые границы."""
     d = d if isinstance(d, dict) else {}
-    hist = [{"role": m["role"], "content": m["content"]}
-            for m in (d.get("history") if isinstance(d.get("history"), list) else [])
-            if isinstance(m, dict) and m.get("role") in ("user", "assistant")
-            and isinstance(m.get("content"), str)]
+    hist = []
+    for m in (d.get("history") if isinstance(d.get("history"), list) else []):
+        if (isinstance(m, dict) and m.get("role") in ("user", "assistant")
+                and isinstance(m.get("content"), str)):
+            e = {"role": m["role"], "content": m["content"]}
+            for k in ("speaker", "to"):                # режим «Группа»: кто говорил / кому
+                if isinstance(m.get(k), str):
+                    e[k] = m[k]
+            hist.append(e)
     n = len(hist)
     chat = []
     for seg in (d.get("chat") if isinstance(d.get("chat"), list) else []):
@@ -166,6 +171,14 @@ def normalize_snapshot(d, max_dyn_new: int = 8) -> dict:
         "story_recap_upto": _clamp_int(d.get("story_recap_upto"), 0, n),
         "dyn_new": [s for s in (d.get("dyn_new") if isinstance(d.get("dyn_new"), list) else [])
                     if isinstance(s, str)][-max_dyn_new:],
+        "dyn_q": {k: [x for x in v if isinstance(x, str)][-max_dyn_new:]
+                  for k, v in (d.get("dyn_q") if isinstance(d.get("dyn_q"), dict) else {}).items()
+                  if isinstance(k, str) and isinstance(v, list)},
+        "group": ({**{k: v for k, v in d["group"].items() if k in ("turns", "to")},
+                   "muted": [b for b in (d["group"].get("muted")
+                                         if isinstance(d["group"].get("muted"), list) else [])
+                             if isinstance(b, str)]}
+                  if isinstance(d.get("group"), dict) else {}),
         "chat": chat,
         "scene": scene,
         "story_characters": [c for c in (d.get("story_characters")

@@ -339,6 +339,9 @@ def test_block_specs_consistent_with_models():
         for _, _, wtype in spec["fields"]:
             assert wtype in ("entry", "textbox"), f"{block}: неизвестный виджет {wtype!r}"
 
+        if "seed" not in spec:                 # "character2": общий список с "character", примеров нет
+            assert block == "character2", f"{block}: нет seed"
+            continue
         seeded = spec["seed"]()
         assert isinstance(seeded, spec["model"]), f"{block}: seed() вернул не тот тип"
         assert seeded.name, f"{block}: seed() без имени"
@@ -1457,6 +1460,9 @@ def test_default_seed_presets_ru_and_en():
     to_dict/from_dict; английский пример без кириллицы."""
     cyr = re.compile("[А-Яа-яЁё]")
     for block, spec in BLOCK_SPECS.items():
+        if block == "character2":              # без своих примеров (общий список с "character")
+            assert "seed" not in spec and "seed_en" not in spec
+            continue
         ru, en = spec["seed"](), spec["seed_en"]()
         assert ru.name and en.name and ru.name != en.name, block
         assert type(en) is spec["model"] and en.id != ru.id
@@ -1832,6 +1838,216 @@ def test_strip_reasoning_on_think_retry():
     plain = pb.strip_reasoning([{"role": "system", "content": body}])
     assert body in plain[0]["content"] and pb.NO_THINK_DIRECTIVE in plain[0]["content"]
     assert pb.strip_reasoning([]) == [] and pb.strip_reasoning(None) == []
+
+
+def test_group_chat_logic():
+    """group_chat: состав сцены, лимит реплик, стенограмма и директива «чей ход»,
+    схема ответа с адресатом (enum), разбор ответа (в т.ч. оборванного), планировщик
+    «кто говорит дальше» (после героя / после персонажа / старт автодиалога)."""
+    import group_chat as g
+    # состав
+    assert g.roster_error("Виктар", "Ксана", "Лайрис") == ""
+    assert g.roster_error("Виктар", "", "Лайрис") == "missing" and g.roster_error("В", "К", " ") == "missing"
+    assert g.roster_error("В", "Ксана", " ксана ") == "same_char"
+    assert g.roster_error("Ксана", "ксана", "Лайрис") == "name_clash"
+    assert g.roster_error("", "Ксана", "Лайрис") == ""                 # имя героя не задано - не конфликт
+    # лимит реплик автодиалога
+    assert g.clamp_turns(20) == 20 and g.clamp_turns("7") == 7 and g.clamp_turns(" 5 ") == 5
+    for bad in ("", "x", None, True, [], {}):
+        assert g.clamp_turns(bad) == g.AUTO_TURNS_DEFAULT, bad
+    assert g.clamp_turns(0) == 1 and g.clamp_turns(-9) == 1 and g.clamp_turns(10**6) == 200
+
+    # стенограмма и директива
+    ents = [{"role": "user", "content": "*кивает*\nПривет", "speaker": "Виктар", "to": "Ксана"},
+            {"role": "assistant", "content": "*улыбается*\nЗдравствуй", "speaker": "Ксана", "to": ""}]
+    assert g.label(ents[0]) == "Виктар → Ксана"
+    assert g.label(ents[1]) == "Ксана → все"                        # адресат виден ВСЕГДА
+    assert g.label(ents[1], lang="en") == "Ксана → all" and g.label({"speaker": "К"}) == "К → все"
+    assert g.label({"content": "x"}, "Fallback") == "Fallback"      # старый формат - без стрелки
+    tr = g.transcript(ents)
+    assert tr.splitlines() == ["Виктар → Ксана: *кивает* Привет", "Ксана → все: *улыбается* Здравствуй"]
+    assert "пока никто" in g.transcript([]) and "nobody" in g.transcript([], "en")
+    um = g.build_user_message(ents[:1], "Ксана", "Виктар")
+    assert um.rstrip().endswith("отреагируй на неё.") and "Теперь ход: Ксана" in um
+    assert um.index("Виктар → Ксана") < um.index("Теперь ход")
+    assert "Сцена только начинается" in g.build_user_message([], "Ксана", "Виктар")
+    assert "не ответил и молчит" in g.build_user_message(ents, "Лайрис", "Виктар", hero_skipped=True)
+    assert "адресована тебе" not in g.build_user_message(ents, "Лайрис", "Виктар")   # адресат - не Лайрис
+    en = g.build_user_message(ents[:1], "Ксана", "Виктар", "en")
+    assert "Now it is Ксана's turn" in en and "addressed to you" in en
+
+    # схема и разбор
+    sch = g.group_schema(["Виктар", "Лайрис"])
+    assert list(sch["properties"]) == ["to", "action", "speech"] and sch["required"] == ["to", "action", "speech"]
+    assert sch["properties"]["to"]["enum"] == ["Виктар", "Лайрис", "все"]
+    assert g.group_schema(["V"], "en")["properties"]["to"]["enum"] == ["V", "all"]
+    others = ["Виктар", "Лайрис"]
+    assert g.normalize_to("лайрис", others) == "Лайрис" and g.normalize_to("ВСЕ", others) == ""
+    assert g.normalize_to("All", others) == "" and g.normalize_to("Кто-то", others) == "" and g.normalize_to(None, others) == ""
+    assert g.parse_reply('{"to": "виктар", "action": "кивает", "speech": "Привет"}', others) == ("Виктар", "кивает", "Привет")
+    assert g.parse_reply('{"to": "Лайрис", "action": "a", "speech": "обор', others) == ("Лайрис", "a", "обор")   # оборванный
+    assert g.parse_reply("просто текст", others) == ("", "", "просто текст")
+    assert g.parse_reply('```json\n{"to": "все", "action": "", "speech": "x"}\n```', others) == ("", "", "x")
+    assert g.parse_reply('{"to": 5, "action": ["a"], "speech": null}', others) == ("", "", "")
+    assert g.parse_reply("", others) == ("", "", "") and g.parse_reply(None, others) == ("", "", "")
+
+    # планировщик
+    a, b, h = "Ксана", "Лайрис", "Виктар"
+    assert g.other_char(a, a, b) == b and g.other_char("лайрис", a, b) == a
+    assert g.least_recent(a, b, []) == a                                   # никто не говорил
+    only_a = [{"speaker": a}, {"speaker": h}]
+    assert g.least_recent(a, b, only_a) == b                               # говорила только Ксана
+    both = [{"speaker": b}, {"speaker": a}, {"speaker": h}]
+    assert g.least_recent(a, b, both) == b                                 # Лайрис говорила давнее
+    assert g.after_hero(a, a, b, both) == [a] and g.after_hero("лайрис", a, b, both) == [b]
+    assert g.after_hero("", a, b, both) == [b, a]                          # «Всем»: давнее говорившая первой
+    assert g.after_hero("кто-то", a, b, []) == [a, b]
+    assert g.after_char(a, b, a, b, h, []) == ("char", b)                  # адресована другой - отвечает она
+    assert g.after_char(a, h, a, b, h, []) == ("hero", h)                  # герою - ждём героя
+    assert g.after_char(a, "", a, b, h, []) == ("char", b)                 # «все» - отвечает другой
+    assert g.after_char(a, h, a, b, h, [b]) == ("char", b)                 # очередь обязательных ответов важнее
+    # один говорящий (второй заглушён): отвечает только он, другому отвечать некому
+    assert g.after_hero("", a, b, both, solo=b) == [b] and g.after_hero(a, a, b, [], solo=b) == [b]
+    assert g.after_char(b, h, a, b, h, [], solo=b) == ("hero", h)      # обратилась к герою - ждём
+    assert g.after_char(b, "", a, b, h, [], solo=b) == ("stop", "")    # ко «всем» - цепочка кончилась
+    assert g.after_char(b, a, a, b, h, [], solo=b) == ("stop", "")
+    assert g.pick_start(a, b, h, []) == (a, False)
+    assert g.pick_start(a, b, h, [{"speaker": h, "to": b}]) == (b, False)
+    assert g.pick_start(a, b, h, [{"speaker": h, "to": ""}, {"speaker": a}]) == (b, False)
+    assert g.pick_start(a, b, h, [{"speaker": a, "to": h}]) == (b, True)   # к герою обратились, он промолчал
+    assert g.pick_start(a, b, h, [{"speaker": b, "to": a}]) == (a, False)
+
+
+def test_group_system_prompt_and_digest_labels():
+    """build_group_system_prompt: ОДИН общий prompt для всех говорящих (обе
+    карточки, память каждого, сцена, правила «видимое/слышимое», формат JSON с
+    адресатом), герой - молчаливый наблюдатель (или его нет); RU/EN. _convo
+    подписывает реплики группы именами участников (память диалога)."""
+    import prompt_builder as pb
+    a = Character(name="Ксана", personality="стервозная", dyn_enabled=True, dyn_memory="### Важные события\n- поцелуй")
+    b = Character(name="Лайрис", personality="надменная", dyn_enabled=True, dyn_readonly=True,
+                  dyn_memory="### Важные события\n- старый долг")
+    off = Character(name="Тень", dyn_enabled=False, dyn_memory="- секрет")
+    hero = Protagonist(name="Виктар", biography="наёмник")
+    sp = pb.build_group_system_prompt([a, b], hero, Environment(location="бар"), Scenario(base_scenario="вечер"),
+                                      SystemConfig(content="Правила"), "доп", "ru")
+    for need in ("Ксана / Лайрис", "Виктар", "молчаливый наблюдатель", "Правила", "поцелуй", "старый долг",
+                 "стервозная", "надменная", "наёмник", "бар", "вечер", "доп", '"to"', '"action"', '"speech"',
+                 "НЕ знает чужих мыслей", "без мыслей и чувств"):
+        assert need in sp, need
+    assert sp.startswith("Правила")                                     # конфиг-промпт - первым
+    sp_off = pb.build_group_system_prompt([off, b], None, lang="ru")
+    assert "секрет" not in sp_off and "молчаливый наблюдатель" not in sp_off      # выкл память / нет героя
+    sp_en = pb.build_group_system_prompt([a, b], hero, lang="en")
+    assert "silent observer" in sp_en and "Answer" not in sp_en[:0] and "reply format is JSON" in sp_en
+    # режим «Диалог» не затронут
+    assert "Ты ведёшь групповую сцену" not in build_system_prompt(
+        character=a, environment=Environment(), scenario=Scenario(), mode="dialogue")
+    # память диалога: подписи по именам
+    convo = pb._convo([{"role": "user", "content": "*кивает*", "speaker": "Виктар", "to": "Ксана"},
+                       {"role": "assistant", "content": "привет", "speaker": "Ксана", "to": ""},
+                       {"role": "user", "content": "старый формат"}], False)
+    assert convo.splitlines() == ["Виктар → Ксана: *кивает*", "Ксана: привет", "Пользователь: старый формат"]
+
+
+def test_dyn_three_states_and_second_character_block():
+    """Три состояния динамической памяти (выкл / чтение / чтение+обновление) -
+    поля персонажа и round-trip; «чтение» идёт в промпт, но не обновляется.
+    Блок «Второй персонаж»: те же поля/хранилище, что у «Персонажа», без своих
+    стартовых примеров; EN-подписи полей берутся у «Персонажа»; сессия
+    «Группы» (speaker/to, очереди сводок по персонажам, режим) не теряется."""
+    import dynamic_memory as dm
+    import i18n
+    c = Character(name="К")
+    assert dm.dyn_state(c) == "off" and dm.dyn_state(None) == "off"
+    for state in dm.STATES:
+        dm.set_state(c, state)
+        assert dm.dyn_state(c) == state
+        back = Character.from_dict(c.to_dict())
+        assert dm.dyn_state(back) == state
+    dm.set_state(c, "read")
+    assert c.dyn_enabled is True and c.dyn_readonly is True
+    dm.set_state(c, "bogus")
+    assert dm.dyn_state(c) == "off"
+    assert Character.from_dict({"id": "x", "dyn_enabled": True}).dyn_readonly is False      # старые записи = обновление
+    assert Character.from_dict({"id": "x", "dyn_enabled": True, "dyn_readonly": "yes"}).dyn_readonly is False
+    c.dyn_memory = "- помнит"
+    dm.set_state(c, "read")
+    assert "помнит" in build_system_prompt(character=c, environment=Environment(), scenario=Scenario(), mode="dialogue")
+
+    # блок второго персонажа
+    assert "character2" in BLOCK_ORDER
+    s1, s2 = BLOCK_SPECS["character"], BLOCK_SPECS["character2"]
+    assert s2["model"] is s1["model"] and s2["load"] == s1["load"] and s2["upsert"] == s1["upsert"]
+    assert s2["fields"] == s1["fields"] and s2["photo"] and s2["dynamic_memory"]
+    assert "seed" not in s2 and "seed_en" not in s2 and s2["title"] != s1["title"]
+    old = i18n.get_lang()
+    try:
+        i18n.set_lang("en")
+        assert i18n.field_labels("character2") == i18n.field_labels("character")
+        assert i18n.block_title("character2") == "Second character"
+    finally:
+        i18n.set_lang(old)
+
+    # сессия «Группы»
+    from sessions import normalize_snapshot
+    n = normalize_snapshot({
+        "mode": "group",
+        "history": [{"role": "user", "content": "привет", "speaker": "Виктар", "to": "Ксана"},
+                    {"role": "assistant", "content": "здравствуй", "speaker": "Ксана", "to": 5, "x": 1}],
+        "dyn_q": {"id1": ["a", 5, "b"], "id2": "bad", 7: ["x"]},
+        "group": {"turns": 12, "to": "Ксана", "evil": 1}})
+    assert n["mode"] == "group"
+    assert n["history"][0] == {"role": "user", "content": "привет", "speaker": "Виктар", "to": "Ксана"}
+    assert n["history"][1] == {"role": "assistant", "content": "здравствуй", "speaker": "Ксана"}   # to не строка - отброшено
+    assert n["dyn_q"] == {"id1": ["a", "b"]} and n["group"] == {"turns": 12, "to": "Ксана", "muted": []}
+    n2 = normalize_snapshot({"group": {"muted": ["character2", 5, None], "turns": 3}})
+    assert n2["group"]["muted"] == ["character2"]                    # мьют переживает сессию, мусор отброшен
+    assert normalize_snapshot({"mode": "xxx"})["mode"] == "dialogue"
+    assert InferenceConfig().group_turns == 20 and InferenceConfig.from_dict({"group_turns": "x"}).group_turns == 20
+    assert InferenceConfig.from_dict({"group_turns": 7}).group_turns == 7
+    assert InferenceConfig.from_dict({"group_turns": 10**6}).group_turns == 200
+    assert "group_turns" not in InferenceConfig(group_turns=5).to_options()
+
+
+def test_group_reply_limits_and_solo_schema():
+    """Режим «Группа»: реплика не может быть «стеной текста» - дословные повторы
+    предложений схлопываются, речь/действие режутся по границе предложения до
+    лимита, на запрос реплики ставится потолок токенов. При заглушённом персонаже
+    адресат ответа ТОЛЬКО герой (в enum нет «все»), а в промпте сказано, что
+    других персонажей в сцене нет."""
+    import group_chat as g
+    import prompt_builder as pb
+    wall = "Да, Хозяин! Всегда Ваша, сэр! " * 60
+    assert g.dedupe_sentences(wall) == "Да, Хозяин! Всегда Ваша, сэр!"
+    uniq = "Первое предложение. Второе предложение.\nТретье предложение."
+    assert g.dedupe_sentences(uniq) == uniq                         # нет повторов - не трогаем (в т.ч. переводы строк)
+    assert g.dedupe_sentences("") == "" and g.dedupe_sentences(None) == ""
+    long_text = " ".join(f"Предложение номер {i} с уникальным текстом." for i in range(200))
+    cut = g.cut_text(long_text, 300)
+    assert len(cut) <= 300 and cut.endswith(".")                    # по границе предложения
+    assert g.cut_text("короткий", 300) == "короткий"
+    nospace = g.cut_text("а" * 1000, 100)
+    assert len(nospace) <= 101 and nospace.endswith("…")
+    a, sp = g.tidy_reply("кланяется. " * 100 + "конец", wall + long_text)
+    assert len(a) <= g.MAX_ACTION_CHARS and len(sp) <= g.MAX_SPEECH_CHARS and sp.startswith("Да, Хозяин!")
+    assert g.tidy_reply("жест", "Привет!") == ("жест", "Привет!")
+    assert g.MAX_TOKENS == 600 and g.STREAM_CHAR_GUARD > g.MAX_SPEECH_CHARS + g.MAX_ACTION_CHARS
+    # схема при мьюте: только герой, без «все»
+    assert g.group_schema(["Виктар"], allow_all=False)["properties"]["to"]["enum"] == ["Виктар"]
+    assert g.group_schema(["Виктар", "Лайрис"])["properties"]["to"]["enum"] == ["Виктар", "Лайрис", "все"]
+    # оборванный ответ-«стена» после обрыва стрима разбирается и подрезается
+    part = '{"to": "Виктар", "action": "кланяется", "speech": "' + "Да, Хозяин! Всегда Ваша, сэр! " * 50
+    to, act, speech = g.parse_reply(part, ["Виктар"])
+    assert to == "Виктар" and act == "кланяется" and g.tidy_reply(act, speech)[1] == "Да, Хозяин! Всегда Ваша, сэр!"
+    # промпт: короткие реплики; один персонаж - «обращайся только к герою»
+    one = pb.build_group_system_prompt([Character(name="Шелти")], Protagonist(name="Виктар"), lang="ru")
+    two = pb.build_group_system_prompt([Character(name="Шелти"), Character(name="Лайрис")],
+                                       Protagonist(name="Виктар"), lang="ru")
+    assert "обращайся только к герою" in one and "обращайся только к герою" not in two
+    assert "Реплика КОРОТКАЯ" in two and "ВСЕГДА указывай его имя" in two
+    assert "only to the protagonist" in pb.build_group_system_prompt(
+        [Character(name="S")], Protagonist(name="V"), lang="en")
 
 
 def test_stall_timeout_config():

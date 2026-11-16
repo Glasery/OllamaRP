@@ -50,6 +50,7 @@ from tkinter import messagebox, filedialog
 import customtkinter as ctk
 
 import dynamic_memory
+import group_chat
 import i18n
 import overlay
 import photos
@@ -59,7 +60,7 @@ from blocks import BLOCK_SPECS, BLOCK_ORDER
 from inference_spec import INFERENCE_FIELDS
 from models import InferenceConfig, EMOTES_MODES
 from storage import PresetStore
-from prompt_builder import (build_system_prompt, strip_reasoning,
+from prompt_builder import (build_system_prompt, build_group_system_prompt, strip_reasoning,
                             build_segment_summary_messages,
                             build_consolidation_messages,
                             build_compress_messages,
@@ -195,7 +196,7 @@ AVATAR_LINES = 2.4
 
 # Внутреннее значение режима везде "dialogue"/"story"/"chat"; подпись
 # вкладки центрального таб-бара - через i18n (MODE_LABELS()/MODE_HINTS()).
-_MODE_KEYS = ("dialogue", "story", "chat")
+_MODE_KEYS = ("dialogue", "group", "story", "chat")
 
 
 def MODE_LABELS():
@@ -238,6 +239,17 @@ class App(ctk.CTk):
         # учтённые в ней, и колбэк «после дособирания перед сохранением»
         self.dyn_new = []
         self._dyn_then = None
+        # режим «Группа»: очереди новых сводок по персонажам (id -> [сводки]),
+        # какие очереди пополняет `_fold_segment` (None = обычная dyn_new) и
+        # состояние планировщика реплик (см. `_group_*`)
+        self.dyn_q = {}
+        self._dyn_queues = None
+        self._group = self._group_blank()
+        # «Группа»: временно заглушённые персонажи (block -> bool). Заглушённый
+        # молчит и «отсутствует» в сцене: герой общается с оставшимся, автодиалог
+        # недоступен; ничего не пишется ему в динамическую память
+        self._group_muted = {"character": False, "character2": False}
+        self._speaker_tag = None
         self._dyn_limit = dynamic_memory.DYN_MEMORY_LIMIT   # из Settings, обновляется при запуске запросов
         self.token_queue = queue.Queue()
         self.log_queue = queue.Queue()   # сырые запросы/ответы для панели Logs
@@ -330,7 +342,8 @@ class App(ctk.CTk):
         lang = "en" if choice == "EN" else "ru"
         if lang == i18n.get_lang():
             return
-        if self.generating or self._rebuilding or self._rebuilding_ui:
+        if (self.generating or self._rebuilding or self._rebuilding_ui
+                or self._group_running()):
             self._lang_seg.set("EN" if i18n.get_lang() == "en" else "RU")
             messagebox.showinfo(t("lang_busy_title"), t("lang_busy"))
             return
@@ -395,6 +408,7 @@ class App(ctk.CTk):
             "mem_head": self.mem_head,
             "mem_segments": list(self.mem_segments),
             "digested_upto": self.digested_upto,
+            "group_to": self._group_to_var.get(),
             "left_settings": self._left_tabs.get() == self._tab_settings,
             "left_photo": self._left_tabs.get() == self._tab_photo,
             "right_memory": self._right_tabs.get() == self._tab_memory,
@@ -456,15 +470,18 @@ class App(ctk.CTk):
 
         # режим + вкладки + панели
         self._on_mode_change(snap["mode"])
+        gt = snap.get("group_to") or ""
+        if gt in list(self._group_to_menu.cget("values")):
+            self._group_to_var.set(gt)
         # ВАЖНО: по одному set() на панель. CTkTabview.set() через 100 мс
         # «забывает» все вкладки, кроме названной; два set() подряд с разными
         # именами гасили только что показанную вкладку (пустая панель).
-        dlg_photos = self.mode_value == "dialogue" and self._gallery_on()
+        dlg_photos = self._dlg_like() and self._gallery_on()
         left = (self._tab_photo if snap["left_photo"] and dlg_photos
                 else self._tab_settings if snap["left_settings"] else self._tab_scene)
         right = (self._tab_photo if snap["right_photo"] and dlg_photos
                  else self._tab_memory if snap["right_memory"]
-                 and self.mode_value == "dialogue" else self._tab_logs)
+                 and self._dlg_like() else self._tab_logs)
         self._set_tab(self._left_tabs, left)
         self._set_tab(self._right_tabs, right)
         self._sync_side_tabs()
@@ -815,7 +832,24 @@ class App(ctk.CTk):
         self._autohide_scrollbar(panel)
 
         # Селекторные строки для всех блоков с одиночным выбором.
+        self._dyn_segs = {}              # block -> переключатель динамической памяти
+        self._mute_rows = {}             # block -> строка с переключателем «Заглушить»
+        self._mute_vars = {}
         self.block_rows = {b: self._make_selector_row(panel, b) for b in BLOCK_ORDER}
+
+        # --- «Группа»: лимит реплик автодиалога ---
+        gsec = ctk.CTkFrame(panel, fg_color="transparent")
+        grow = ctk.CTkFrame(gsec, fg_color="transparent")
+        grow.pack(fill="x")
+        ctk.CTkLabel(grow, text=t("group_turns_label"), anchor="w").pack(side="left")
+        self._group_turns_var = tk.StringVar(
+            value=str(getattr(self, "_group_turns_keep", group_chat.AUTO_TURNS_DEFAULT)))
+        ctk.CTkEntry(grow, width=70, textvariable=self._group_turns_var,
+                     justify="center").pack(side="right")
+        ctk.CTkLabel(gsec, text=t("group_turns_help"), anchor="w", justify="left",
+                     wraplength=380, text_color="gray",
+                     font=ctk.CTkFont(size=11)).pack(fill="x", pady=(PAD_TIGHT, 0))
+        self.group_params_section = gsec
 
         # --- story: несколько персонажей ---
         sec = ctk.CTkFrame(panel, fg_color="transparent")
@@ -879,6 +913,7 @@ class App(ctk.CTk):
         self._panel_sections = (list(self.block_rows.values())
                                 + [self.story_char_section,
                                    self.story_params_section,
+                                   self.group_params_section,
                                    self._chat_note])
 
     def _autohide_scrollbar(self, sframe):
@@ -938,7 +973,81 @@ class App(ctk.CTk):
                       command=lambda b=block: self._open_manager(b)).pack(side="right")
         menu.pack(side="left", fill="x", expand=True, padx=(0, PAD_TIGHT))
         self.block_menus[block] = (menu, var)
+        if BLOCK_SPECS[block].get("dynamic_memory"):
+            # динамическая память персонажа: Выкл / Чтение / Обновление -
+            # то же, что в форме персонажа, но под рукой на экране диалога
+            drow = ctk.CTkFrame(row, fg_color="transparent")
+            drow.pack(fill="x", pady=(PAD_TIGHT, 0))
+            ctk.CTkLabel(drow, text="🧠", width=24).pack(side="left")
+            labels = [t(f"dyn_state_{st}") for st in dynamic_memory.STATES]
+            seg = ctk.CTkSegmentedButton(
+                drow, values=labels, font=ctk.CTkFont(size=11),
+                command=lambda v, b=block: self._on_dyn_state_pick(b, v))
+            seg.pack(side="left", fill="x", expand=True)
+            self._dyn_segs[block] = seg
+        if block in ("character", "character2"):
+            # «Группа»: временный мьют (виден только в этом режиме, см. _apply_mode_view)
+            mrow = ctk.CTkFrame(row, fg_color="transparent")
+            mvar = tk.BooleanVar(value=bool(self._group_muted.get(block)))
+            ctk.CTkSwitch(mrow, text=t("group_mute_label"), variable=mvar,
+                          command=lambda b=block: self._on_group_mute(b)).pack(anchor="w")
+            self._mute_rows[block] = mrow
+            self._mute_vars[block] = mvar
         return row
+
+    def _on_group_mute(self, block):
+        """Переключатель «Заглушить»: персонаж молчит и «отсутствует» в сцене,
+        герой общается с оставшимся, автодиалог недоступен."""
+        want = bool(self._mute_vars[block].get())
+        other = "character2" if block == "character" else "character"
+        if want and self._group_muted.get(other):
+            self._mute_vars[block].set(False)
+            messagebox.showinfo(t("group_err_title"), t("group_err_both_muted"))
+            return
+        self._group_muted[block] = want
+        if self._group_running():
+            self._group["pause"] = True       # цепочка остановится после текущей реплики
+        r = self._group_roster()
+        self._refresh_group_to_menu()
+        self._refresh_active_label()
+        self._sync_group_ui()
+        self._overlay_reposition()
+        if want and r["solo"]:
+            muted_name = r["b"] if block == "character2" else r["a"]
+            self.gen_status.configure(text=t("st_group_muted", muted=muted_name,
+                                             active=r["solo"]))
+        elif not self.generating:
+            self.gen_status.configure(text="")
+
+    def _refresh_dyn_toggles(self):
+        """Переключатели динамической памяти под выбранных персонажей."""
+        for block, seg in getattr(self, "_dyn_segs", {}).items():
+            obj = self.active.get(block)
+            try:
+                seg.configure(state="normal" if obj is not None else "disabled")
+                seg.set(t(f"dyn_state_{dynamic_memory.dyn_state(obj)}"))
+            except tk.TclError:
+                pass
+
+    def _on_dyn_state_pick(self, block, label):
+        """Клик по переключателю: записать состояние в активный объект и в
+        сохранённый пресет (только эти поля - правки формы не затираем)."""
+        obj = self.active.get(block)
+        if obj is None:
+            return
+        state = next((st for st in dynamic_memory.STATES
+                      if t(f"dyn_state_{st}") == label), "off")
+        for o in (obj, *[self.active.get(b) for b in ("character", "character2")
+                         if self.active.get(b) is not None and self.active[b].id == obj.id]):
+            dynamic_memory.set_state(o, state)
+        try:
+            stored = next((p for p in self.store.load_characters() if p.id == obj.id), None)
+            if stored is not None:
+                dynamic_memory.set_state(stored, state)
+                self.store.upsert_character(stored)
+        except Exception as e:
+            self.log_queue.put(self._fmt_log_entry("DYNAMIC MEMORY: save error", str(e)))
+        self._refresh_dyn_toggles()
 
     # ------------------------------------------------- вкладка Settings ----
     def _build_settings_panel(self, parent):
@@ -1114,6 +1223,8 @@ class App(ctk.CTk):
         kwargs["right_panel_hidden"] = getattr(self, "_right_hidden", False)
         kwargs["left_panel_hidden"] = getattr(self, "_left_hidden", False)
         kwargs["emotes_mode"] = getattr(self, "_emotes_mode", "all")
+        gv = getattr(self, "_group_turns_var", None)
+        kwargs["group_turns"] = group_chat.clamp_turns(gv.get() if gv is not None else None)
         kwargs["ui_language"] = getattr(self, "_ui_language", "ru")
         # плейсхолдеры ("...", "модели не найдены") не запоминаем - иначе
         # сохранение в момент, когда Ollama временно недоступна/список
@@ -1136,6 +1247,7 @@ class App(ctk.CTk):
             self._right_hidden = bool(cfg.right_panel_hidden)
             self._left_hidden = bool(cfg.left_panel_hidden)
             self._emotes_mode = cfg.emotes_mode
+            self._group_turns_var.set(str(cfg.group_turns))
         _tl = i18n.think_labels()
         for attr, (kind, w) in self._inf_widgets.items():
             val = getattr(cfg, attr)
@@ -1176,6 +1288,11 @@ class App(ctk.CTk):
             rows = [self.block_rows["protagonist"], self.block_rows["character"],
                     self.block_rows["environment"], self.block_rows["scenario"],
                     self.block_rows["system_config"]]
+        elif mode == "group":
+            rows = [self.block_rows["protagonist"], self.block_rows["character"],
+                    self.block_rows["character2"], self.block_rows["environment"],
+                    self.block_rows["scenario"], self.block_rows["system_config"],
+                    self.group_params_section]
         elif mode == "story":
             rows = [self.block_rows["protagonist"], self.story_char_section,
                     self.block_rows["scenario"], self.block_rows["system_config"],
@@ -1184,6 +1301,11 @@ class App(ctk.CTk):
             rows = [self._chat_note]
         for w in rows:
             w.pack(fill="x", padx=PAD, pady=PAD_TIGHT)
+        for blk, mrow in self._mute_rows.items():      # мьют - только в «Группе»
+            if mode == "group":
+                mrow.pack(fill="x", pady=(PAD_TIGHT, 0))
+            else:
+                mrow.pack_forget()
 
         # «Дополнительные детали» под скроллом: своё поле на режим; в chat
         # блок и подсказка про «—» не нужны.
@@ -1196,7 +1318,7 @@ class App(ctk.CTk):
             self.dialogue_details_box.grid_remove()
             self.story_details_box.grid_remove()
             (self.story_details_box if mode == "story"
-             else self.dialogue_details_box).grid()
+             else self.dialogue_details_box).grid()     # «Группа» делит поле с «Диалогом»
 
         # Память - только диалог. В story/chat кнопку вкладки «Память»
         # прячем (дайджест не генерируется и к запросу не цепляется); сам
@@ -1262,7 +1384,7 @@ class App(ctk.CTk):
         if rc:
             rc()
 
-    _MODES = ["dialogue", "story", "chat"]
+    _MODES = ["dialogue", "group", "story", "chat"]
 
     def _build_chat_panel(self, parent):
         # Центр - тоже CTkTabview (как боковые панели -> одинаковый хром и
@@ -1323,6 +1445,17 @@ class App(ctk.CTk):
             self._action_tag = "action"
         except Exception:
             self._action_tag = None
+        # Имя говорящего («Группа»): «Имя → Кому» жирным и цветом.
+        self._speaker_tag = None
+        try:
+            tb = self.chat_box._textbox
+            base_b = tkfont.Font(font=tb.cget("font"))
+            self._chat_bold = tkfont.Font(family=base_b.actual("family"),
+                                          size=base_b.actual("size"), weight="bold")
+            tb.tag_configure("speaker", font=self._chat_bold, foreground="#7fb3ff")
+            self._speaker_tag = "speaker"
+        except Exception:
+            self._speaker_tag = None
         # Поля абзаца для хода с аватаркой: первая строка начинается с самой
         # аватарки (уже с зазором справа), все остальные строки хода - и
         # перенесённые, и после \n - сдвинуты ровно на её ширину, так что
@@ -1356,8 +1489,24 @@ class App(ctk.CTk):
         self._dlg_input.grid(row=0, column=0, sticky="nsew")
         self._dlg_input.grid_columnconfigure(0, weight=1)
         self._dlg_input.grid_rowconfigure(3, weight=1)   # «реплика» тянется вниз
-        ctk.CTkLabel(self._dlg_input, text=t("dlg_action_label"),
-                     anchor="w").grid(row=0, column=0, sticky="w")
+        hdr = ctk.CTkFrame(self._dlg_input, fg_color="transparent", height=28)
+        hdr.grid(row=0, column=0, sticky="ew")
+        self._dlg_action_lbl = ctk.CTkLabel(hdr, text=t("dlg_action_label"), anchor="w")
+        self._dlg_action_lbl.pack(side="left")
+        # «Группа»: кому адресована реплика героя (в «Диалоге» скрыто). Стоит в
+        # правом верхнем углу всей формы - над колонкой кнопок, на одной линии с
+        # подписью «Действие героя» (28 px - высота строки подписи, как у pady кнопок)
+        self._group_to_wrap = ctk.CTkFrame(form, fg_color="transparent", width=214, height=28)
+        self._group_to_wrap.pack_propagate(False)
+        to_inner = ctk.CTkFrame(self._group_to_wrap, fg_color="transparent")
+        to_inner.pack(side="right")               # содержимое прижато к правому краю формы
+        ctk.CTkLabel(to_inner, text=t("group_to_label")).pack(
+            side="left", padx=(0, PAD_TIGHT))
+        self._group_to_var = tk.StringVar(value="")
+        self._group_to_menu = ctk.CTkOptionMenu(
+            to_inner, variable=self._group_to_var, values=[t("group_to_all")],
+            width=150, height=24, dynamic_resizing=False)
+        self._group_to_menu.pack(side="left")
         self.act_box = ctk.CTkTextbox(self._dlg_input, height=52, wrap="word")
         self.act_box.grid(row=1, column=0, sticky="ew")
         ctk.CTkLabel(self._dlg_input, text=t("dlg_reply_label"),
@@ -1389,9 +1538,10 @@ class App(ctk.CTk):
         hint_kw = dict(anchor="w", justify="left", wraplength=560,
                        font=ctk.CTkFont(size=10), text_color="gray")
         self._dlg_hint = ctk.CTkLabel(form, text=t("hint_send_dialogue"), **hint_kw)
+        self._group_hint = ctk.CTkLabel(form, text=t("hint_send_group"), **hint_kw)
         self._story_hint = ctk.CTkLabel(form, text=t("hint_send_story"), **hint_kw)
         self._chat_hint = ctk.CTkLabel(form, text=t("hint_send_chat"), **hint_kw)
-        for h in (self._dlg_hint, self._story_hint, self._chat_hint):
+        for h in (self._dlg_hint, self._group_hint, self._story_hint, self._chat_hint):
             h.grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
             h.grid_remove()
 
@@ -1406,6 +1556,17 @@ class App(ctk.CTk):
                                       fg_color="#a33333", hover_color="#c44444",
                                       state="disabled", command=self._on_stop)
         self.stop_btn.pack(fill="x", pady=(PAD_TIGHT, 0))
+        # «Группа»: автодиалог (▶ Авто / ⏸ Пауза) и одна реплика (⏭ Шаг) -
+        # одной строкой, видна только в этом режиме
+        self._group_btns = ctk.CTkFrame(btns, fg_color="transparent")
+        self._group_auto_btn = ctk.CTkButton(
+            self._group_btns, text=t("group_auto_btn"), width=62,
+            command=self._on_group_auto)
+        self._group_auto_btn.pack(side="left")
+        self._group_step_btn = ctk.CTkButton(
+            self._group_btns, text=t("group_step_btn"), width=58,
+            fg_color="gray30", hover_color="gray40", command=self._on_group_step)
+        self._group_step_btn.pack(side="left", padx=(PAD_TIGHT, 0))
         self.clear_btn = ctk.CTkButton(btns, text=t("clear_btn"), width=124,
                                        command=self._on_clear)
         self.clear_btn.pack(fill="x", pady=(PAD_TIGHT, 0))
@@ -1436,6 +1597,7 @@ class App(ctk.CTk):
 
     def _apply_input_mode(self, mode):
         parts = {"dialogue": (self._dlg_input, self._dlg_hint),
+                 "group": (self._dlg_input, self._group_hint),
                  "story": (self._story_input, self._story_hint),
                  "chat": (self._chat_input, self._chat_hint)}
         for frame, hint in parts.values():
@@ -1444,6 +1606,17 @@ class App(ctk.CTk):
         frame, hint = parts.get(mode, parts["dialogue"])
         frame.grid()
         hint.grid()
+        # элементы только режима «Группа»: адресат и кнопки автодиалога
+        self._dlg_action_lbl.configure(
+            text=t("group_action_label" if mode == "group" else "dlg_action_label"))
+        if mode == "group":
+            self._group_to_wrap.grid(row=0, column=0, columnspan=2, sticky="ne")
+            self._group_to_wrap.lift()
+            self._group_btns.pack(fill="x", pady=(PAD_TIGHT, 0), before=self.clear_btn)
+        else:
+            self._group_to_wrap.grid_remove()
+            self._group_btns.pack_forget()
+        self._sync_group_ui()
         self._mode_hint.configure(text=MODE_HINTS().get(mode, ""))
 
     def _read_input(self):
@@ -1580,6 +1753,25 @@ class App(ctk.CTk):
     _SIDES = {"left": ("protagonist", "_left_tabs", "_left_col"),
               "right": ("character", "_right_tabs", "_right_col")}
 
+    def _dlg_like(self) -> bool:
+        """Режимы с боковыми вкладками «Память»/«Фото» и эмотиконами."""
+        return self.mode_value in ("dialogue", "group")
+
+    def _side_owner(self, panel_block):
+        """Чей пресет показывает панель/окно стороны. Обычно: слева герой,
+        справа персонаж. В «Группе» героя-наблюдателя не показываем: слева
+        первый персонаж, справа второй."""
+        if self.mode_value == "group":
+            return {"protagonist": "character", "character": "character2"}.get(
+                panel_block, panel_block)
+        return panel_block
+
+    def _owner_side(self, owner):
+        """Сторона экрана для эмотикона владельца (None - не показывается)."""
+        if self.mode_value == "group":
+            return {"character": "left", "character2": "right"}.get(owner)
+        return "left" if owner == "protagonist" else "right"
+
     def _set_tab(self, tabs, name):
         """Программно выбрать вкладку CTkTabview. Его set() через 100 мс
         отложенно «забывает» все вкладки, кроме названной, - если рядом (в
@@ -1612,7 +1804,7 @@ class App(ctk.CTk):
         """Эмотиконы сейчас должны быть на экране: галка, Windows, диалог и
         режим кнопки вверху не «скрыты»."""
         return bool(overlay.AVAILABLE and self._setting_on("show_emotes")
-                    and self.mode_value == "dialogue"
+                    and self._dlg_like()
                     and getattr(self, "_emotes_mode", "all") != "hidden")
 
     def _owner_files(self, block, kind):
@@ -1643,7 +1835,7 @@ class App(ctk.CTk):
         tab.bind("<Configure>", lambda _e, b=block: self._schedule_photo_panel(b))
 
     def _gallery_step(self, block, delta):
-        n = len(self._owner_files(block, "gallery"))
+        n = len(self._owner_files(self._side_owner(block), "gallery"))
         if n > 1:
             self._gallery_idx[block] = (self._gallery_idx.get(block, 0) + delta) % n
             self._schedule_photo_panel(block)
@@ -1677,8 +1869,9 @@ class App(ctk.CTk):
             tab, img, cap = p["tab"], p["img"], p["cap"]
             if not tab.winfo_exists():
                 return
-            obj = self.active.get(block)
-            title = i18n.block_title(block)
+            owner = self._side_owner(block)
+            obj = self.active.get(owner)
+            title = i18n.block_title(owner)
 
             def show_text(txt, caption=""):
                 p["ctk"], p["key"] = None, None
@@ -1691,7 +1884,7 @@ class App(ctk.CTk):
             if obj is None:
                 show_text(t("photo_panel_none", title=title))
                 return
-            files = self._owner_files(block, "gallery")
+            files = self._owner_files(owner, "gallery")
             # у другого пресета - снова с первого фото
             if self._gallery_owner.get(block) != obj.id:
                 self._gallery_owner[block] = obj.id
@@ -1762,8 +1955,9 @@ class App(ctk.CTk):
         """Новый ответ в чате: эмотикон этой стороны -> следующий по кругу."""
         if len(self._owner_files(block, "emotes")) > 1:
             self._emote_idx[block] = self._emote_idx.get(block, 0) + 1
-        side = "left" if block == "protagonist" else "right"
-        self._overlay_place(side)
+        side = self._owner_side(block)
+        if side is not None:
+            self._overlay_place(side)
 
     def _overlay_hide(self, side):
         ov = self._overlays.get(side)
@@ -1785,9 +1979,14 @@ class App(ctk.CTk):
         col = getattr(self, col_attr)
         try:
             # режим «только собеседник»: эмотикон героя (левая сторона) не рисуем
+            # (в «Группе» слева персонаж, там режим «собеседник» не действует)
             shown = self._emotes_on() and not (
-                side == "left" and self._emotes_mode == "companion")
-            pil = self._emote_pil(block) if shown else None
+                side == "left" and self._emotes_mode == "companion"
+                and self.mode_value != "group")
+            owner = self._side_owner(block)
+            if shown and self.mode_value == "group" and self._group_muted.get(owner):
+                shown = False                      # заглушён: в сцене отсутствует
+            pil = self._emote_pil(owner) if shown else None
             ok = (pil is not None and col.winfo_viewable()
                   and self.state() != "iconic")
         except tk.TclError:
@@ -1846,6 +2045,8 @@ class App(ctk.CTk):
         чтобы добраться до обоих меню). Режим запоминается."""
         i = EMOTES_MODES.index(self._emotes_mode) if self._emotes_mode in EMOTES_MODES else 0
         self._emotes_mode = EMOTES_MODES[(i + 1) % len(EMOTES_MODES)]
+        if self._emotes_mode == "companion" and self.mode_value == "group":
+            self._emotes_mode = EMOTES_MODES[(i + 2) % len(EMOTES_MODES)]   # в «Группе» режима нет
         self._sync_emotes_ui()
         try:
             self.store.save_settings(self._collect_inference_config())
@@ -1859,7 +2060,7 @@ class App(ctk.CTk):
         btn = getattr(self, "_emote_btn", None)
         if btn is not None:
             show = bool(overlay.AVAILABLE and self._setting_on("show_emotes")
-                        and self.mode_value == "dialogue")
+                        and self._dlg_like())
             try:
                 if show:
                     btn.configure(text=t(f"emotes_mode_{self._emotes_mode}"))
@@ -1876,7 +2077,7 @@ class App(ctk.CTk):
         «Память» и «Фото» - только в диалоге; «Фото» (галерея) неактивна, если
         галка «Галерея» выключена (или нет Pillow). Зовётся при смене режима,
         переключении галок, загрузке настроек и пересборке окна."""
-        dlg = self.mode_value == "dialogue"
+        dlg = self._dlg_like()
         on = self._gallery_on()
         lvals = [self._tab_scene, self._tab_settings] + ([self._tab_photo] if dlg else [])
         rvals = [self._tab_logs] + ([self._tab_memory, self._tab_photo] if dlg else [])
@@ -2018,6 +2219,9 @@ class App(ctk.CTk):
         рабочим сразу после запуска."""
         for block in BLOCK_ORDER:
             presets = self._load_block_presets(block)
+            if block == "character2":       # второй персонаж - другой, чем первый (если есть)
+                first_id = getattr(self.active.get("character"), "id", None)
+                presets = [p for p in presets if p.id != first_id]
             if presets:
                 first = self._default_preset(block, presets)
                 self.active[block] = first
@@ -2074,17 +2278,20 @@ class App(ctk.CTk):
         Обновляем меню и, если активный пресет удалён/переименован,
         подстраиваем self.active и выбранное значение."""
         presets = self._load_block_presets(block)
-        active = self.active.get(block)
-        if active is not None:
-            match = next((p for p in presets if p.id == active.id), None)
-            self.active[block] = match
-            self._refresh_block_menu(
-                block, select=match.name if match else NONE_CHOICE)
-        else:
-            self._refresh_block_menu(block)
+        # «персонаж» и «второй персонаж» - один список пресетов: обновляем оба
+        for blk in (("character", "character2") if block in ("character", "character2")
+                    else (block,)):
+            active = self.active.get(blk)
+            if active is not None:
+                match = next((p for p in presets if p.id == active.id), None)
+                self.active[blk] = match
+                self._refresh_block_menu(
+                    blk, select=match.name if match else NONE_CHOICE)
+            else:
+                self._refresh_block_menu(blk)
 
         # список персонажей story-режима тоже мог поехать
-        if block == "character":
+        if block in ("character", "character2"):
             by_id = {p.id: p for p in presets}
             self.story_characters = [by_id[c.id] for c in self.story_characters
                                      if c.id in by_id]
@@ -2106,6 +2313,15 @@ class App(ctk.CTk):
                      f"{t('lbl_location')}: {nm('environment')}",
                      f"{t('lbl_scenario')}: {nm('scenario')}",
                      f"{t('lbl_configuration')}: {nm('system_config')}"]
+        elif self.mode_value == "group":
+            mute = {b: (" 🔇" if self._group_muted.get(b) else "")
+                    for b in ("character", "character2")}
+            parts = [f"{t('lbl_you')}: {nm('protagonist')}",
+                     f"{t('lbl_character')}: {nm('character')}{mute['character']}",
+                     f"{t('lbl_character2')}: {nm('character2')}{mute['character2']}",
+                     f"{t('lbl_location')}: {nm('environment')}",
+                     f"{t('lbl_scenario')}: {nm('scenario')}",
+                     f"{t('lbl_configuration')}: {nm('system_config')}"]
         else:
             chars = ", ".join(c.name or "?" for c in self.story_characters) or NONE_CHOICE
             parts = [f"{t('lbl_you')}: {nm('protagonist')}",
@@ -2113,6 +2329,9 @@ class App(ctk.CTk):
                      f"{t('lbl_scenario')}: {nm('scenario')}",
                      f"{t('lbl_configuration')}: {nm('system_config')}"]
         self.active_label.configure(text="   ·   ".join(parts))
+        self._refresh_dyn_toggles()       # состояние динамической памяти выбранных
+        if hasattr(self, "_group_to_menu"):
+            self._refresh_group_to_menu()
         self._refresh_photo_panels()      # выбранный пресет сменился - и фото тоже
 
     def _active_or_empty(self, block):
@@ -2141,6 +2360,10 @@ class App(ctk.CTk):
         self.story_recap_upto = 0
 
     def _on_mode_change(self, value):
+        if value != "group" and self._group_running():
+            self._group_cancel()                  # ушли из «Группы» - цепочку реплик не продолжаем
+            if self.stop_event is not None:
+                self.stop_event.set()
         self.mode_value = value
         self._update_send_btn_label()
         # синхронизировать таб-бар (клик по нему уже выставил вкладку сам)
@@ -2150,6 +2373,8 @@ class App(ctk.CTk):
             self._chat_body.tkraise()
         self._apply_mode_view(value)
         self._apply_input_mode(value)
+        if value == "group":
+            self._refresh_group_to_menu()
 
     def _refresh_models(self):
         try:
@@ -2301,25 +2526,37 @@ class App(ctk.CTk):
         ts = time.strftime("%H:%M:%S")
         return f"\n========== {title}  [{ts}] ==========\n{body}\n"
 
+    def _refresh_busy_buttons(self):
+        """Доступность кнопок по состоянию «идёт генерация / цепочка реплик».
+        «Группа»: между репликами цепочки (и пока она идёт) интерфейс «занят»,
+        а «Отправить» остаётся доступной - реплика героя встанет после текущей."""
+        flag = self.generating
+        busy = flag or self._group_running()
+        self.send_btn.configure(
+            state="disabled" if (flag and self.mode_value != "group") else "normal")
+        self.clear_btn.configure(state="disabled" if busy else "normal")
+        self.export_btn.configure(state="disabled" if busy else "normal")
+        self.sessions_btn.configure(state="disabled" if busy else "normal")
+        self.stop_btn.configure(state="normal" if busy else "disabled")
+        self._mem_rebuild_btn.configure(state="disabled" if busy else "normal")
+        self._clear_all_btn.configure(state="disabled" if busy else "normal")
+        self._lang_seg.configure(state="disabled" if busy else "normal")
+        self._sync_group_ui()
+
     def _set_generating(self, flag: bool):
         self.generating = flag
-        self.send_btn.configure(state="disabled" if flag else "normal")
-        self.clear_btn.configure(state="disabled" if flag else "normal")
-        self.export_btn.configure(state="disabled" if flag else "normal")
-        self.sessions_btn.configure(state="disabled" if flag else "normal")
-        self.stop_btn.configure(state="normal" if flag else "disabled")
-        self._mem_rebuild_btn.configure(state="disabled" if flag else "normal")
-        self._clear_all_btn.configure(state="disabled" if flag else "normal")
-        self._lang_seg.configure(state="disabled" if flag else "normal")
+        self._refresh_busy_buttons()
         self.gen_status.configure(text=t("st_wait") if flag else "")
 
     def _on_stop(self):
+        if self._group_running():
+            self._group_cancel()                  # цепочка реплик «Группы» - вся
         if self.stop_event is not None:
             self.stop_event.set()
         self.stop_btn.configure(state="disabled")
 
     def _on_clear(self):
-        if self.generating or self._rebuilding:
+        if self.generating or self._rebuilding or self._group_running():
             return
         if self.history and not messagebox.askyesno(
                 t("clear_dlg_title"), t("clear_dlg_msg")):
@@ -2337,7 +2574,7 @@ class App(ctk.CTk):
     def _on_clear_all(self):
         """Одной кнопкой (верхняя панель): чат + история + бегущая память +
         панель Logs. Пресеты и настройки не трогает."""
-        if self.generating or self._rebuilding:
+        if self.generating or self._rebuilding or self._group_running():
             return
         if not messagebox.askyesno(t("clear_all_title"), t("clear_all_msg")):
             return
@@ -2364,24 +2601,45 @@ class App(ctk.CTk):
     #     ней обновляется динамическая (`_dyn_flush_worker`);
     #   * результат записывается в пресет персонажа в ГЛАВНОМ потоке
     #     (маркер `__DYN_MEMORY__`), чтобы не гоняться с правками пресетов.
+    def _dyn_targets(self, inf=None):
+        """[(персонаж, очередь сводок)] - чья динамическая память сейчас
+        ОБНОВЛЯЕТСЯ: состояние «Обновление» (не «Выкл»/«Чтение») и память
+        диалога включена (`digest_window` > 0 - на ней всё и держится).
+        «Диалог»: активный персонаж (очередь `dyn_new`). «Группа»: оба
+        персонажа, у каждого своя очередь (`dyn_q`). Только из UI-потока."""
+        inf = inf or self._collect_inference_config()
+        if (inf.digest_window or 0) <= 0:
+            return []
+        if self.mode_value == "dialogue":
+            ch = self.active.get("character")
+            if dynamic_memory.dyn_state(ch) == "update":
+                return [(ch, self.dyn_new)]
+        elif self.mode_value == "group":
+            out = []
+            for blk in ("character", "character2"):
+                ch = self.active.get(blk)
+                if self._group_muted.get(blk):
+                    continue                     # заглушён: в сцене отсутствует
+                if dynamic_memory.dyn_state(ch) == "update":
+                    out.append((ch, self.dyn_q.setdefault(ch.id, [])))
+            return out
+        return []
+
     def _dyn_char(self, inf=None):
-        """Активный собеседник, если динамическая память сейчас работает:
-        режим «Диалог», у персонажа включена галка и память диалога не
-        выключена (`digest_window` > 0 - на ней всё и держится)."""
+        """Активный собеседник «Диалога», если его динамическая память сейчас
+        обновляется (см. `_dyn_targets`)."""
         if self.mode_value != "dialogue":
             return None
-        ch = self.active.get("character")
-        if ch is None or not getattr(ch, "dyn_enabled", False):
-            return None
-        inf = inf or self._collect_inference_config()
-        return ch if (inf.digest_window or 0) > 0 else None
+        targets = self._dyn_targets(inf)
+        return targets[0][0] if targets else None
 
-    def _dyn_update(self, model, options, keep_alive, char) -> str:
+    def _dyn_update(self, model, options, keep_alive, char, queue=None) -> str:
         """Один скрытый запрос «обнови динамическую память» (из фонового
         потока). -> "changed" / "same" / "fail" / "skip" (нечего обрабатывать).
-        Новые события (`dyn_new`) считаются обработанными при "changed" и
-        "same"; при "fail" остаются - попробуем в следующий раз."""
-        if not self.dyn_new:
+        Новые события (`queue`, по умолчанию `dyn_new`) считаются обработанными
+        при "changed" и "same"; при "fail" остаются - попробуем в следующий раз."""
+        queue = self.dyn_new if queue is None else queue
+        if not queue:
             return "skip"
         self.token_queue.put("__DYN_BUILDING__")
         prot = self.active.get("protagonist")
@@ -2392,7 +2650,7 @@ class App(ctk.CTk):
         mode = dynamic_memory.choose_mode(char.dyn_memory, self._dyn_limit, lang)
         msgs = dynamic_memory.build_messages(
             char.name, getattr(prot, "name", "") or "", char.dyn_memory,
-            list(self.dyn_new), limit=self._dyn_limit, lang=lang,
+            list(queue), limit=self._dyn_limit, lang=lang,
             rules=getattr(char, "dyn_prompt", ""), mode=mode)
         # ответ - JSON по схеме (structured outputs): разделы гарантированы форматом
         if mode == "delta":
@@ -2417,14 +2675,15 @@ class App(ctk.CTk):
         else:
             self.log_queue.put(self._fmt_log_entry(t("log_dyn_failed", name=name), ""))
         if status != "fail":
-            self.dyn_new = []
+            del queue[:]
         return status
 
     def _apply_dyn_memory(self, char_id, text):
         """(главный поток) Записать новую динамическую память: в активные
         объекты (собеседник диалога / персонажи story) и в сохранённый пресет
         - только это поле, чтобы не затереть правки, сделанные в форме."""
-        for obj in (self.active.get("character"), *self.story_characters):
+        for obj in (self.active.get("character"), self.active.get("character2"),
+                    *self.story_characters):
             if obj is not None and obj.id == char_id:
                 obj.dyn_memory = text
         try:
@@ -2438,9 +2697,14 @@ class App(ctk.CTk):
     def _dyn_flush_needed(self) -> bool:
         """Есть ли что дособрать перед сохранением: необработанные сводки или
         ходы, ещё не свёрнутые в память диалога."""
-        if self._dyn_char() is None:
+        targets = self._dyn_targets()
+        if not targets:
             return False
-        return bool(self.dyn_new) or len(self.history) // 2 * 2 > self.digested_upto
+        return (any(q for _c, q in targets)
+                or len(self.history) // 2 * 2 > self.digested_upto)
+
+    def _dyn_target_names(self) -> str:
+        return ", ".join(c.name or "?" for c, _q in self._dyn_targets())
 
     def _dyn_flush_start(self, then):
         """Дособрать память диалога (хвост), затем обновить динамическую -
@@ -2449,7 +2713,9 @@ class App(ctk.CTk):
         model = self.model_var.get()
         inf = self._collect_inference_config()
         N = inf.digest_window or 6
-        char = self._dyn_char(inf)
+        targets = self._dyn_targets(inf)
+        self._dyn_queues = ([q for _c, q in targets] if self.mode_value == "group"
+                            else None)        # куда `_fold_segment` кладёт новые сводки
         self._dyn_limit = inf.dyn_limit()
         self._dyn_then = then
         self._rebuilding = True
@@ -2460,10 +2726,10 @@ class App(ctk.CTk):
         threading.Thread(
             target=self._dyn_flush_worker,
             args=(model, N, inf.to_options(), inf.keep_alive or None,
-                  inf.digest_prompt, char),
+                  inf.digest_prompt, targets),
             daemon=True).start()
 
-    def _dyn_flush_worker(self, model, N, options, keep_alive, digest_prompt, char):
+    def _dyn_flush_worker(self, model, N, options, keep_alive, digest_prompt, targets):
         status = "fail"
         try:
             end = len(self.history) // 2 * 2
@@ -2476,7 +2742,10 @@ class App(ctk.CTk):
                     self._fold_segment(model, list(self.history[start:e]), start, e,
                                        options, keep_alive, digest_prompt)
                     start = e
-            status = self._dyn_update(model, options, keep_alive, char)
+            results = [self._dyn_update(model, options, keep_alive, c, q)
+                       for c, q in targets]
+            status = ("fail" if "fail" in results else
+                      "changed" if "changed" in results else "same")
         except Exception as e:
             self.log_queue.put(self._fmt_log_entry(t("log_mem_error", model=model), str(e)))
         self.token_queue.put(("__DYN_FLUSH_DONE__", status))
@@ -2493,6 +2762,9 @@ class App(ctk.CTk):
     def _session_default_name(self) -> str:
         if self.mode_value == "story":
             who = ", ".join(c.name for c in self.story_characters if c.name)
+        elif self.mode_value == "group":
+            who = " + ".join(self.active[b].name for b in ("character", "character2")
+                             if self.active.get(b) and self.active[b].name)
         elif self.mode_value == "dialogue":
             o = self.active.get("character")
             who = o.name if (o and o.name) else ""
@@ -2550,6 +2822,10 @@ class App(ctk.CTk):
             "story_recap": self.story_recap,
             "story_recap_upto": self.story_recap_upto,
             "dyn_new": list(self.dyn_new),
+            "dyn_q": {k: list(v) for k, v in self.dyn_q.items()},
+            "group": {"turns": group_chat.clamp_turns(self._group_turns_var.get()),
+                      "to": self._group_to_var.get(),
+                      "muted": [b for b, v in self._group_muted.items() if v]},
             "chat": self._chat_segments(),
             "scene": {b: (self.active[b].to_dict() if self.active.get(b) else None)
                       for b in BLOCK_ORDER},
@@ -2623,7 +2899,7 @@ class App(ctk.CTk):
         hist = [m for m in d.get("history") or []
                 if isinstance(m, dict) and m.get("role") in ("user", "assistant")
                 and isinstance(m.get("content"), str)]
-        self.history = [{"role": m["role"], "content": m["content"]} for m in hist]
+        self.history = [dict(m) for m in hist]       # role/content (+ speaker/to в «Группе»)
         n = len(self.history)
         self.mem_head = d.get("mem_head") if isinstance(d.get("mem_head"), str) else ""
         self.mem_segments = [s for s in d.get("mem_segments") or [] if isinstance(s, str)]
@@ -2632,6 +2908,17 @@ class App(ctk.CTk):
         self.story_recap_upto = min(max(int(d.get("story_recap_upto") or 0), 0), n)
         self.dyn_new = [s for s in d.get("dyn_new") or [] if isinstance(s, str)][
             -dynamic_memory.DYN_NEW_MAX_ITEMS:]
+        self.dyn_q = {k: list(v) for k, v in (d.get("dyn_q") or {}).items()}
+        self._dyn_queues = None
+        self._group = self._group_blank()
+        grp = d.get("group") or {}
+        self._group_turns_var.set(str(group_chat.clamp_turns(grp.get("turns"))))
+        muted = [b for b in (grp.get("muted") or []) if b in self._group_muted]
+        if len(muted) > 1:
+            muted = muted[:1]                      # заглушить можно только одного
+        self._group_muted = {b: b in muted for b in ("character", "character2")}
+        for b, var in self._mute_vars.items():
+            var.set(self._group_muted[b])
         self._history_backup, self._details_backup = [], ""
         self._just_compressed = False
         self._render_memory()
@@ -2650,12 +2937,16 @@ class App(ctk.CTk):
             else:
                 missing = model
         self._refresh_active_label()
+        self._refresh_group_to_menu()
+        if (grp.get("to") or "") in list(self._group_to_menu.cget("values")):
+            self._group_to_var.set(grp["to"])
         self._sync_side_tabs()
         self._refresh_memory_box()
         return {"restored": restored, "model_missing": missing}
 
     def _sessions_blocked(self) -> bool:
-        if self.generating or self._rebuilding or self._rebuilding_ui:
+        if (self.generating or self._rebuilding or self._rebuilding_ui
+                or self._group_running()):
             messagebox.showinfo(t("sess_title"), t("sess_busy"))
             return True
         return False
@@ -2684,9 +2975,9 @@ class App(ctk.CTk):
         # персонажа). Это единственное место, где память диалога и динамическая
         # идут двумя запросами подряд.
         if self._dyn_flush_needed():
-            char = self._dyn_char()
             ans = messagebox.askyesnocancel(
-                t("sess_title"), t("sess_dyn_q", name=char.name or "?"), parent=parent)
+                t("sess_title"), t("sess_dyn_q", name=self._dyn_target_names()),
+                parent=parent)
             if ans is None:
                 return False
             if ans:
@@ -2820,6 +3111,16 @@ class App(ctk.CTk):
                 o = a.get(key)
                 if o and o.name:
                     out.append(f"{lbl}: {o.name}")
+        elif self.mode_value == "group":
+            for key, lbl in (("protagonist", t("lbl_protagonist")),
+                             ("character", t("lbl_character")),
+                             ("character2", t("lbl_character2")),
+                             ("environment", t("lbl_location")),
+                             ("scenario", t("lbl_scenario")),
+                             ("system_config", t("lbl_configuration"))):
+                o = a.get(key)
+                if o and o.name:
+                    out.append(f"{lbl}: {o.name}")
         elif self.mode_value == "story":
             o = a.get("protagonist")
             if o and o.name:
@@ -2840,6 +3141,24 @@ class App(ctk.CTk):
         'action' - действие/чувства (в docx курсивом, в txt в *…*),
         'line'   - строка речи/текста (первая с префиксом «Кто:»),
         'note'   - авторское указание в story, 'gap' - разделитель."""
+        if self.mode_value == "group":            # реплики подписаны именами участников
+            for m in self.history:
+                content = (m.get("content") or "").strip()
+                if not content:
+                    continue
+                who = group_chat.label(m, t("lbl_character"), i18n.get_lang())
+                said = False
+                for ln in content.split("\n"):
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    if len(ln) > 1 and ln.startswith("*") and ln.endswith("*"):
+                        yield ("action", ln[1:-1].strip())
+                    else:
+                        yield ("line", f"{who}: {ln}" if not said else ln)
+                        said = True
+                yield ("gap", "")
+            return
         o = self.active.get("character")
         char_name = o.name if (o and o.name) else t("lbl_character")
         auto_msgs = {"Напиши историю.", "Продолжай историю.",
@@ -2926,6 +3245,10 @@ class App(ctk.CTk):
         doc.save(path)
 
     def _on_send(self):
+        if self.mode_value == "group":            # свой планировщик реплик (см. _group_*)
+            self._on_send_group()
+            return
+        self._dyn_queues = None                   # «Диалог»: сводки идут в dyn_new
         if self.generating or self._rebuilding:
             return
         model = self.model_var.get()
@@ -3095,8 +3418,325 @@ class App(ctk.CTk):
             kwargs={"think_timeout": inf.think_seconds()},
             daemon=True).start()
 
+    # ------------------------------------------------ режим «Группа» ----
+    # Два персонажа + герой-наблюдатель (см. group_chat.py). Один запрос =
+    # одна реплика одного персонажа; кто говорит дальше - решает КОД по полю
+    # `to` ответа (кому адресована реплика). Состояние планировщика - `_group`:
+    #   running      - идёт «цепочка» реплик (после реплики героя / «▶ Авто» / «⏭ Шаг»);
+    #   auto         - автодиалог (цепочка до лимита реплик), иначе короткая цепочка;
+    #   pause        - мягкая пауза: цепочка остановится ПОСЛЕ текущей реплики;
+    #   chain_left   - сколько реплик персонажей ещё можно в этой цепочке;
+    #   queue        - кому ОБЯЗАТЕЛЬНО ответить (после «Всем» от героя);
+    #   next         - кто говорит следующим;
+    #   pending_hero - реплика героя, набранная во время генерации (встанет после текущей);
+    #   hero_skipped - к герою обратились, а он промолчал (для директивы модели).
+    @staticmethod
+    def _group_blank():
+        return {"running": False, "auto": False, "pause": False, "chain_left": 0,
+                "queue": [], "next": None, "pending_hero": None, "hero_skipped": False,
+                "first": False}
+
+    def _group_running(self) -> bool:
+        return bool(self._group.get("running"))
+
+    def _group_roster(self) -> dict:
+        """Состав сцены: герой (имя), два персонажа (объекты и имена) + код
+        ошибки состава (см. group_chat.roster_error)."""
+        hero_obj = self.active.get("protagonist")
+        hero = ((hero_obj.name or "").strip() if hero_obj else "") or t("lbl_you")
+        a_obj, b_obj = self.active.get("character"), self.active.get("character2")
+        a = (a_obj.name or "").strip() if a_obj else ""
+        b = (b_obj.name or "").strip() if b_obj else ""
+        err = group_chat.roster_error(hero, a, b)
+        if not err and a_obj is not None and b_obj is not None and a_obj.id == b_obj.id:
+            err = "same_char"
+        muted = {blk: bool(self._group_muted.get(blk)) for blk in ("character", "character2")}
+        active = [n for n, blk in ((a, "character"), (b, "character2")) if not muted[blk]]
+        return {"hero_obj": hero_obj, "hero": hero, "a_obj": a_obj, "a": a,
+                "b_obj": b_obj, "b": b, "err": err, "muted": muted, "active": active,
+                "solo": active[0] if len(active) == 1 else ""}
+
+    def _group_to_name(self) -> str:
+        """Выбранный адресат реплики героя: имя персонажа или "" (= всем)."""
+        v = self._group_to_var.get()
+        solo = self._group_roster()["solo"]
+        if solo:
+            return solo                          # второй заглушён - говорить можно только с этим
+        return "" if v == t("group_to_all") else v
+
+    def _refresh_group_to_menu(self):
+        """Список адресатов под выбранных персонажей: [первый, второй, Всем]."""
+        r = self._group_roster()
+        values = [n for n in r["active"] if n]
+        if len(r["active"]) == 2:
+            values.append(t("group_to_all"))     # «Всем» - только когда есть кому ответить обоим
+        if not values:
+            values = [t("group_to_all")]
+        self._group_to_menu.configure(values=values)
+        if self._group_to_var.get() not in values:
+            self._group_to_var.set(values[0])
+
+    def _sync_group_ui(self):
+        """Кнопки автодиалога под текущее состояние планировщика."""
+        g = self._group
+        busy = g["running"] or self.generating
+        try:
+            if g["running"]:
+                if g["pause"]:
+                    self._group_auto_btn.configure(text=t("group_pausing_btn"), state="disabled")
+                else:
+                    self._group_auto_btn.configure(text=t("group_pause_btn"), state="normal")
+            else:
+                self._group_auto_btn.configure(
+                    text=t("group_auto_btn"),
+                    state="disabled" if (self.generating or self._rebuilding) else "normal")
+            # при мьюте кнопки НЕ отключены: клик показывает алерт, почему автодиалога нет
+            self._group_step_btn.configure(
+                state="disabled" if (busy or self._rebuilding) else "normal")
+        except tk.TclError:
+            pass
+
+    def _group_stop_chain(self, reason=None):
+        """Остановить цепочку реплик. reason: "paused" / "limit" / "wait:<имя>"
+        / None - что показать в статусе."""
+        g = self._group
+        g.update(running=False, auto=False, pause=False, chain_left=0, queue=[],
+                 next=None, hero_skipped=False, first=False)
+        self._refresh_busy_buttons()           # цепочка кончилась - кнопки снова доступны
+        txt = ""
+        if reason == "paused":
+            txt = t("st_group_paused")
+        elif reason == "limit":
+            txt = t("st_group_limit", n=group_chat.clamp_turns(self._group_turns_var.get()))
+        elif reason and reason.startswith("wait:"):
+            txt = t("st_group_wait_hero", name=reason[5:])
+        if not self.generating:
+            self.gen_status.configure(text=txt)
+
+    def _group_cancel(self):
+        """«Стоп»/смена режима: убить цепочку; набранную во время генерации
+        реплику героя вернуть в поля ввода (чтобы текст не пропал)."""
+        g = self._group
+        pend = g.get("pending_hero")
+        g["pending_hero"] = None
+        if pend:
+            act, reply, _to = pend
+            if act and not self.act_box.get("1.0", "end").strip():
+                self.act_box.insert("1.0", act)
+            if reply and not self.reply_box.get("1.0", "end").strip():
+                self.reply_box.insert("1.0", reply)
+        self._group_stop_chain(None)
+
+    def _group_check_ready(self) -> bool:
+        """Модель выбрана и состав сцены корректен (иначе - сообщение)."""
+        if self._no_model(self.model_var.get()):
+            messagebox.showwarning(t("pick_model_title"), t("pick_model_msg"))
+            return False
+        err = self._group_roster()["err"]
+        if err:
+            messagebox.showwarning(t("group_err_title"), t(f"group_err_{err}"))
+            return False
+        return True
+
+    # ---- реплика героя ----
+    def _on_send_group(self):
+        if self._rebuilding:
+            return
+        action, reply = self._read_input()
+        if not action and not reply:
+            return
+        if not self._group_check_ready():
+            return
+        to = self._group_to_name()
+        g = self._group
+        if self.generating or g["running"]:
+            # герой вмешался посреди цепочки: его реплика встанет СРАЗУ после
+            # текущей, цепочка после неё начнётся заново (отвечает адресат)
+            g["pending_hero"] = (action, reply, to)
+            g["pause"] = True
+            self._clear_input()
+            self.gen_status.configure(text=t("st_group_pending"))
+            self._sync_group_ui()
+            return
+        self._group_hero_turn(action, reply, to)
+
+    def _group_hero_turn(self, action, reply, to):
+        """Записать реплику героя и запустить ответы персонажей."""
+        r = self._group_roster()
+        canon = "\n".join(p for p in (f"*{action}*" if action else "", reply) if p)
+        entry = {"role": "user", "content": canon, "speaker": r["hero"], "to": to}
+        self.history.append(entry)
+        inf = self._collect_inference_config()
+        av = self._photo_for("protagonist") if inf.show_avatars else ""
+        self._clear_input()
+        self._append_chat("\n\n")
+        self._begin_turn(av)
+        self._append_chat(group_chat.label(entry, lang=i18n.get_lang()) + "\n", self._speaker_tag)
+        if action:
+            self._append_chat(*self._action_piece(action))
+        if reply:
+            if action:
+                self._append_chat("\n")
+            self._append_chat(reply + "\n")
+        self._end_turn()
+        queue = group_chat.after_hero(to, r["a"], r["b"], self.history, solo=r["solo"])
+        g = self._group
+        g.update(running=True, auto=False, pause=False,
+                 chain_left=group_chat.MANUAL_CHAIN, next=queue.pop(0),
+                 queue=queue, hero_skipped=False, first=True, pending_hero=None)
+        self._group_run_next()
+
+    # ---- автодиалог / шаг ----
+    def _on_group_auto(self):
+        g = self._group
+        if g["running"]:
+            g["pause"] = True                    # мягкая пауза после текущей реплики
+            self._sync_group_ui()
+            return
+        self._group_start_free(auto=True)
+
+    def _on_group_step(self):
+        if self._group["running"] or self.generating or self._rebuilding:
+            return
+        self._group_start_free(auto=False)
+
+    def _group_start_free(self, auto: bool):
+        """Персонажи говорят сами: «▶ Авто» (до лимита реплик) или «⏭ Шаг»
+        (одна реплика). Кто первым - group_chat.pick_start."""
+        if self.generating or self._rebuilding or not self._group_check_ready():
+            return
+        r = self._group_roster()
+        if r["solo"]:                        # один персонаж заглушён: самому по себе говорить некому
+            muted_name = r["b"] if self._group_muted.get("character2") else r["a"]
+            messagebox.showinfo(t("group_err_title"),
+                                t("group_err_muted_noauto", muted=muted_name, active=r["solo"]))
+            return
+        speaker, skipped = group_chat.pick_start(r["a"], r["b"], r["hero"], self.history)
+        limit = group_chat.clamp_turns(self._group_turns_var.get()) if auto else 1
+        self._group_turns_var.set(str(group_chat.clamp_turns(self._group_turns_var.get())))
+        self._group.update(running=True, auto=auto, pause=False, chain_left=limit,
+                           queue=[], next=speaker, hero_skipped=skipped, first=True)
+        self._group_run_next()
+
+    # ---- цепочка реплик ----
+    def _group_run_next(self):
+        g = self._group
+        if g["pause"]:
+            self._group_stop_chain("paused")
+            return
+        if g["chain_left"] <= 0:
+            self._group_stop_chain("limit" if g["auto"] else None)
+            return
+        speaker = g["next"]
+        if not speaker or not self._group_begin_turn(speaker, g.get("hero_skipped", False)):
+            self._group_stop_chain(None)
+            return
+        g["hero_skipped"] = False
+        g["first"] = False
+
+    def _group_begin_turn(self, speaker: str, hero_skipped: bool = False) -> bool:
+        """Собрать запрос реплики `speaker` и запустить воркер. False - не
+        вышло (нет модели, плохой состав сцены, отмена в проверке контекста)."""
+        model = self.model_var.get()
+        if not self._group_check_ready():
+            return False
+        r = self._group_roster()
+        lang = i18n.get_lang()
+        inf = self._collect_inference_config()
+        think, _nudge = self._resolve_reasoning(inf.think)   # structured: просьбы рассуждать в промпте нет
+        self._dyn_limit = inf.dyn_limit()
+        digest_window = inf.digest_window or 0
+        is_a = group_chat.same(speaker, r["a"])
+        block = "character" if is_a else "character2"
+        if r["muted"][block]:
+            return False                      # заглушённый не говорит
+        other = r["b"] if is_a else r["a"]
+        others = [r["hero"]] + ([other] if other in r["active"] else [])
+        in_scene = [o for o, n in ((r["a_obj"], r["a"]), (r["b_obj"], r["b"]))
+                    if n in r["active"]]
+        # ОБЩИЙ system-промпт (одинаков для обоих говорящих -> кэш промпта Ollama),
+        # «чей ход» - в конце единственного user-сообщения
+        system_prompt = build_group_system_prompt(
+            in_scene, r["hero_obj"],
+            environment=self.active.get("environment"),
+            scenario=self.active.get("scenario"),
+            system_config=self.active.get("system_config"),
+            extra_details=self.dialogue_details_box.get("1.0", "end").strip(), lang=lang)
+        sp = system_prompt
+        recent = list(self.history)
+        if digest_window > 0:
+            if self.chat_digest.strip():
+                sp = (system_prompt + "\n\n" + memory_header(lang) + "\n"
+                      + self.chat_digest.strip())
+            recent = self.history[self.digested_upto:]
+        messages = [{"role": "system", "content": sp},
+                    {"role": "user", "content": group_chat.build_user_message(
+                        recent, speaker, r["hero"], lang, hero_skipped=hero_skipped)}]
+        opts = inf.to_options()
+        # реплика короткая: без потолка модель иногда уходила в бесконечный повтор
+        # внутри JSON (минуты ожидания, «стена текста»); меньший лимит из Settings
+        # сохраняем
+        cur_np = opts.get("num_predict")
+        opts["num_predict"] = (min(cur_np, group_chat.MAX_TOKENS)
+                               if isinstance(cur_np, int) and cur_np > 0
+                               else group_chat.MAX_TOKENS)
+        if self._group.get("first"):
+            # размер контекста проверяем на ПЕРВОЙ реплике цепочки (диалог выбора
+            # без «сжать пример»: он завязан на режим «Диалог»)
+            if self._preflight_context(messages, inf, opts, allow_compress=False) in (
+                    "cancel", "compress"):
+                return False
+        targets = self._dyn_targets(inf)
+        self._dyn_queues = [q for _c, q in targets]    # куда `_fold_segment` кладёт сводки
+        allow_all = len(r["active"]) == 2        # при мьюте говорить можно только с героем
+        group = {"speaker": speaker, "others": others, "lang": lang, "block": block,
+                 "targets": targets}
+        av = self._photo_for(block) if inf.show_avatars else ""
+        self.stop_event = threading.Event()
+        self._set_generating(True)
+        self.gen_status.configure(text=t("st_group_turn", name=speaker))
+        threading.Thread(
+            target=self._generate_worker,
+            args=(model, messages, self.stop_event, opts, think,
+                  inf.keep_alive or None,
+                  group_chat.group_schema(others, lang, allow_all=allow_all), True,
+                  digest_window, "\n\n", inf.digest_prompt, inf.stall_seconds(), av, None),
+            kwargs={"think_timeout": inf.think_seconds(), "group": group},
+            daemon=True).start()
+        return True
+
+    def _group_after_turn(self, info: dict):
+        """(главный поток) Реплика закончена: решить, что дальше."""
+        g = self._group
+        if not g["running"]:
+            return                                    # остановили («Стоп»)
+        pend = g["pending_hero"]
+        if pend:                                       # герой вмешался: его реплика первой
+            g["pending_hero"] = None
+            self._group_stop_chain(None)
+            self._group_hero_turn(*pend)
+            return
+        if not info.get("ok"):
+            self._group_stop_chain(None)
+            return
+        g["chain_left"] -= 1
+        r = self._group_roster()
+        kind, who = group_chat.after_char(info["speaker"], info.get("to", ""),
+                                          r["a"], r["b"], r["hero"], g["queue"],
+                                          solo=r["solo"])
+        if kind == "stop":                    # второй заглушён: цепочка закончилась
+            self._group_stop_chain(None)
+            return
+        if kind == "hero":
+            self._group_stop_chain("wait:" + info["speaker"])
+            return
+        if g["queue"] and group_chat.same(g["queue"][0], who):
+            g["queue"].pop(0)
+        g["next"] = who
+        self._group_run_next()
+
     # -------------------------------------- предпроверка контекста ----
-    def _preflight_context(self, messages, inf, opts):
+    def _preflight_context(self, messages, inf, opts, allow_compress=True):
         """Прикинуть, влезет ли запрос в num_ctx. Возвращает:
         None - продолжать (влезает / выбрано «как есть»); "increase" -
         num_ctx поднят (уже в `opts`); "compress" - запустить сжатие;
@@ -3113,7 +3753,8 @@ class App(ctk.CTk):
         if ctx is None and need <= 4000:
             return None                  # маленький запрос - дефолта модели хватит
         suggested = next_num_ctx(need)
-        choice = self._ask_context_choice(need, ctx, suggested, allow_compress=not just)
+        choice = self._ask_context_choice(need, ctx, suggested,
+                                          allow_compress=allow_compress and not just)
         if choice == "increase":
             _kind, w = self._inf_widgets["num_ctx"]
             w.delete(0, "end")
@@ -3476,7 +4117,8 @@ class App(ctk.CTk):
     def _generate_worker(self, model, messages, stop_event, options, think,
                          keep_alive, response_format=None, structured=False,
                          digest_window=0, reply_sep="", digest_prompt="",
-                         stall_timeout=0, avatar_file="", dyn_char=None, think_timeout=0):
+                         stall_timeout=0, avatar_file="", dyn_char=None, think_timeout=0,
+                         group=None):
         orig_messages = list(messages)    # неизменный исходный запрос
         base_messages = orig_messages     # что уйдёт СЛЕДУЮЩЕЙ попыткой
         base_options = options            # для пересборки памяти - без anti-dup правок
@@ -3488,6 +4130,13 @@ class App(ctk.CTk):
         sep_pushed = False    # reply_sep в чат отдаём один раз за весь вызов
         story_prefix = ""   # чистый текст, уже принятый из попыток, оборванных
                              # из-за зацикливания (не-structured режим)
+
+        def _parse(text):
+            """(to, action, speech): «Группа» - с адресатом по списку участников."""
+            if group is not None:
+                return group_chat.parse_reply(text, group["others"], group["lang"])
+            a_, s_ = parse_structured_reply(text)
+            return "", a_, s_
 
         def on_request(payload):
             # payload - ровно тот словарь, что уходит в requests.post(json=...).
@@ -3527,6 +4176,12 @@ class App(ctk.CTk):
                                 self.token_queue.put(("__TURN__", avatar_file))
                             sep_pushed = True
                     buffer.append(chunk)
+                    if group is not None and sum(map(len, buffer)) > group_chat.STREAM_CHAR_GUARD:
+                        # «стена текста» внутри JSON: обрываем стрим (то, что пришло,
+                        # разберётся как оборванный JSON и будет подрезано)
+                        self.log_queue.put(self._fmt_log_entry(
+                            "GROUP: reply too long - stream cut", ""))
+                        break
                     if not structured:
                         self.token_queue.put(chunk)   # structured копит и парсит в конце
                         if "\n" in chunk:
@@ -3634,7 +4289,7 @@ class App(ctk.CTk):
                 break
 
             if structured:
-                _a, _sp = parse_structured_reply(full_reply)
+                _to, _a, _sp = _parse(full_reply)
                 if _sp and attempt < DUP_MAX_RETRIES and self._is_dup_speech(_sp):
                     attempt += 1
                     self.token_queue.put(("__RETRY_DUP__", attempt, DUP_MAX_RETRIES))
@@ -3695,16 +4350,26 @@ class App(ctk.CTk):
         stopped = stop_event.is_set()
 
         got_reply = False
+        g_to = ""
         if structured:
-            action, speech = parse_structured_reply(full_reply)
+            g_to, action, speech = _parse(full_reply)
+            if group is not None:                   # без повторов предложений и не длиннее лимита
+                action, speech = group_chat.tidy_reply(action, speech)
             canon = "\n".join(p for p in (
                 f"*{action}*" if action else "", speech) if p)
+            entry = {"role": "assistant", "content": canon}
+            if group is not None:                   # «Группа»: кто говорил и кому
+                entry.update(speaker=group["speaker"], to=g_to)
             if canon:
-                self.history.append({"role": "assistant", "content": canon})
+                self.history.append(entry)
                 got_reply = True
             self.token_queue.put(reply_sep or "\n\n")   # два отступа перед ходом персонажа
             if reply_sep and (action or speech or full_reply.strip()):
-                self.token_queue.put(("__TURN__", avatar_file))   # аватарка + эмотикон
+                self.token_queue.put(("__TURN__", avatar_file,
+                                      group["block"] if group is not None else "character"))
+                if group is not None:
+                    self.token_queue.put((group_chat.label(entry, lang=group["lang"]) + "\n",
+                                          self._speaker_tag))
             if action:
                 self.token_queue.put(self._action_piece(action))
             if speech:
@@ -3727,7 +4392,8 @@ class App(ctk.CTk):
         # Генерация ничего не дала (ошибка / «Стоп» до первого токена):
         # убираем висячую реплику user, иначе следующий ход даст два
         # user подряд и chat-шаблон модели упадёт (роли должны чередоваться).
-        if not got_reply and self.history and self.history[-1]["role"] == "user":
+        if (not got_reply and group is None and self.history
+                and self.history[-1]["role"] == "user"):
             self.history.pop()
 
         self.log_queue.put(self._fmt_log_entry(
@@ -3746,12 +4412,27 @@ class App(ctk.CTk):
         # долгое ожидание) и не после каждой сводки, а когда их накопилось
         # DYN_MIN_NEW (т.е. вдвое реже); при сохранении диалога обновляется
         # независимо от порога (_dyn_flush_worker).
-        if (got_reply and not stopped and not folded and dyn_char is not None
+        if (group is None and got_reply and not stopped and not folded
+                and dyn_char is not None
                 and len(self.dyn_new) >= dynamic_memory.DYN_MIN_NEW):
             self._dyn_update(model, base_options, keep_alive, dyn_char)
+        elif group is not None and got_reply and not stopped and not folded:
+            # «Группа»: у каждого персонажа своя очередь; за реплику обновляем
+            # ОДНОГО - у кого накопилось больше (так обновления чередуются)
+            ready = [(c, q) for c, q in group["targets"]
+                     if len(q) >= dynamic_memory.DYN_MIN_NEW]
+            if ready:
+                c, q = max(ready, key=lambda cq: len(cq[1]))
+                self._dyn_update(model, base_options, keep_alive, c, q)
 
         if stopped:
             self.token_queue.put(f"\n{t('stopped_by_user')}\n")
+        if group is not None:
+            # вместо __DONE__: обработчик сам завершит ход и решит, что дальше
+            self.token_queue.put(("__GROUP_TURN__", {
+                "ok": bool(got_reply and not had_error and not stopped),
+                "speaker": group["speaker"], "to": g_to}))
+            return
         self.token_queue.put("__DONE__")
 
     # ------------------------------------------------ бегущая память ----
@@ -3771,6 +4452,8 @@ class App(ctk.CTk):
         self.mem_segments = []
         self.digested_upto = 0
         self.dyn_new = []
+        self.dyn_q = {}
+        self._dyn_queues = None
         self._render_memory()
 
     def _render_memory(self) -> str:
@@ -3846,8 +4529,10 @@ class App(ctk.CTk):
         self.mem_segments.append(summary)
         if got and dyn:
             # новая сводка ждёт обработки в динамической памяти персонажа
-            self.dyn_new.append(summary)
-            del self.dyn_new[:-dynamic_memory.DYN_NEW_MAX_ITEMS]
+            # (персонажей): «Диалог» - dyn_new, «Группа» - очередь каждого
+            for q in (self._dyn_queues if self._dyn_queues is not None else [self.dyn_new]):
+                q.append(summary)
+                del q[:-dynamic_memory.DYN_NEW_MAX_ITEMS]
 
         while len(self.mem_segments) > MEM_SEGMENTS_KEEP:
             overflow = self.mem_segments[0]
@@ -4099,7 +4784,13 @@ class App(ctk.CTk):
                     self.gen_status.configure(text=t("st_retry_dup", i=i, n=n))
                 elif isinstance(item, tuple) and item and item[0] == "__TURN__":
                     self._begin_turn(item[1])        # аватарка перед репликой персонажа
-                    self._emote_advance("character")  # и следующий эмотикон собеседника
+                    # и следующий эмотикон его владельца («Группа» - один из двух персонажей)
+                    self._emote_advance(item[2] if len(item) > 2 else "character")
+                elif isinstance(item, tuple) and item and item[0] == "__GROUP_TURN__":
+                    self._set_generating(False)       # то же, что __DONE__, + планировщик реплик
+                    self._append_chat("\n")
+                    self._end_turn()
+                    self._group_after_turn(item[1])
                 elif isinstance(item, tuple) and item and item[0] == "__RETRY_THINK__":
                     _, i, n, secs, no_think = item
                     self.gen_status.configure(

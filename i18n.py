@@ -71,6 +71,7 @@ _UI = {
     },
     "lbl_you": {"ru": "Вы", "en": "You"},
     "lbl_character": {"ru": "Персонаж", "en": "Character"},
+    "lbl_character2": {"ru": "Второй", "en": "Second"},
     "lbl_characters": {"ru": "Персонажи", "en": "Characters"},
     "lbl_location": {"ru": "Локация", "en": "Location"},
     "lbl_scenario": {"ru": "Сценарий", "en": "Scenario"},
@@ -126,6 +127,10 @@ _UI = {
     "mode_dialogue": {"ru": "Диалог", "en": "Dialogue"},
     "mode_story": {"ru": "История", "en": "Story"},
     "mode_chat": {"ru": "Чат", "en": "Chat"},
+    "mode_group": {"ru": "Группа", "en": "Group"},
+    "hint_group": {
+        "ru": "Группа: два персонажа говорят сами, вы — молчаливый наблюдатель",
+        "en": "Group: two characters talk by themselves, you are a silent observer"},
     "hint_dialogue": {"ru": "Диалог с одним персонажем — реплики по очереди",
                       "en": "Dialogue with one character — turn by turn"},
     "hint_story": {"ru": "Генерация истории по заранее заданным параметрам",
@@ -139,6 +144,63 @@ _UI = {
     "story_input_label": {"ru": "Указания к истории / правки (необязательно)",
                           "en": "Story directions / edits (optional)"},
     "chat_msg_label": {"ru": "Сообщение", "en": "Message"},
+    "hint_send_group": {
+        "ru": "Ctrl+Enter — реплика героя · ▶ Авто — персонажи говорят сами · » Шаг — одна реплика",
+        "en": "Ctrl+Enter — hero's line · ▶ Auto — characters talk by themselves · » Step — one line"},
+    "group_action_label": {"ru": "Действие героя (курсивом)", "en": "Hero's action (italics)"},
+    "group_to_label": {"ru": "Кому:", "en": "To:"},
+    "group_to_all": {"ru": "Всем", "en": "Everyone"},
+    "group_auto_btn": {"ru": "▶ Авто", "en": "▶ Auto"},
+    "group_pause_btn": {"ru": "‖ Пауза", "en": "‖ Pause"},
+    "group_pausing_btn": {"ru": "‖ …", "en": "‖ …"},
+    "group_step_btn": {"ru": "» Шаг", "en": "» Step"},
+    "group_turns_label": {"ru": "Лимит реплик автодиалога", "en": "Auto-dialogue line limit"},
+    "group_turns_help": {
+        "ru": "Сколько реплик подряд персонажи говорят сами после «▶ Авто» (1–200). Автодиалог "
+              "сам останавливается раньше, если к вам обращаются: ответьте или нажмите «▶ Авто» / «» Шаг».",
+        "en": "How many lines in a row the characters say by themselves after “▶ Auto” (1–200). The "
+              "auto-dialogue stops earlier by itself when someone addresses you: answer or press “▶ Auto” / “» Step”."},
+    "group_err_title": {"ru": "Режим «Группа»", "en": "“Group” mode"},
+    "group_err_missing": {
+        "ru": "Выберите двух персонажей: «Персонаж» и «Второй персонаж».",
+        "en": "Pick two characters: “Character” and “Second character”."},
+    "group_err_same_char": {
+        "ru": "Выбран один и тот же персонаж дважды — выберите двух разных.",
+        "en": "The same character is chosen twice — pick two different ones."},
+    "group_err_name_clash": {
+        "ru": "Имя персонажа совпадает с именем героя — модель различает участников по именам. "
+              "Переименуйте одного из них.",
+        "en": "A character has the same name as the hero — the model tells the participants "
+              "apart by name. Rename one of them."},
+    "group_mute_label": {"ru": "Заглушить", "en": "Mute"},
+    "group_err_both_muted": {
+        "ru": "Нельзя заглушить обоих персонажей — кто-то должен отвечать. Сначала включите второго.",
+        "en": "You cannot mute both characters — someone has to answer. Unmute the other one first."},
+    "st_group_muted": {
+        "ru": "🔇 {muted} заглушён(а): автодиалог недоступен, герой общается только с {active}",
+        "en": "🔇 {muted} is muted: auto-dialogue is unavailable, the hero talks only to {active}"},
+    "group_err_muted_noauto": {
+        "ru": "«{muted}» заглушён(а): автодиалог и «» Шаг» недоступны, пока кто-то заглушён. "
+              "Герой общается только с «{active}». Отключите «Заглушить», чтобы продолжить.",
+        "en": "“{muted}” is muted: auto-dialogue and “» Step” are unavailable while anyone is muted. "
+              "The hero talks only to “{active}”. Turn off “Mute” to continue."},
+    "st_group_muted_noauto": {
+        "ru": "🔇 Один из персонажей заглушён — автодиалог недоступен. Отключите мьют, чтобы продолжить",
+        "en": "🔇 One of the characters is muted — auto-dialogue is unavailable. Unmute to continue"},
+    "st_group_turn": {"ru": "💬 говорит {name}…", "en": "💬 {name} is speaking…"},
+    "st_group_wait_hero": {
+        "ru": "‖ {name} обращается к вам — ответьте или нажмите «▶ Авто» / «» Шаг»",
+        "en": "‖ {name} addresses you — answer or press “▶ Auto” / “» Step”"},
+    "st_group_paused": {"ru": "‖ автодиалог на паузе", "en": "‖ auto-dialogue paused"},
+    "st_group_limit": {
+        "ru": "⏹ лимит реплик ({n}) — «▶ Авто», чтобы продолжить",
+        "en": "⏹ line limit ({n}) reached — “▶ Auto” to continue"},
+    "st_group_pending": {
+        "ru": "⏳ ваша реплика встанет сразу после текущей",
+        "en": "⏳ your line goes in right after the current one"},
+    "dyn_state_off": {"ru": "Выкл", "en": "Off"},
+    "dyn_state_read": {"ru": "Чтение", "en": "Read"},
+    "dyn_state_update": {"ru": "Обновление", "en": "Update"},
     "hint_send_dialogue": {
         "ru": "Ctrl+Enter — отправить · достаточно заполнить одно из полей",
         "en": "Ctrl+Enter — send · filling in just one field is enough",
@@ -243,17 +305,23 @@ _UI = {
                       "en": "🧠 updating the character's dynamic memory…"},
 
     # динамическая память персонажа (dynamic_memory.py, форма пресета, gui._dyn_*)
+    "dyn_states_label": {
+        "ru": "Динамическая память персонажа: ", "en": "Character's dynamic memory: "},
     "dyn_enable": {
         "ru": "Динамическая память персонажа",
         "en": "Character's dynamic memory"},
     "dyn_hint": {
         "ru": "Персонаж запоминает самое важное между диалогами (только собеседник, не герой). "
+              "Выкл — память не используется; Чтение — идёт в промпт персонажа, но не обновляется "
+              "(можно пробовать сцену, не засоряя память); Обновление — читается и обновляется. "
               "Приложение само обновляет память по ходу диалога, держа пять разделов: изменения "
               "отношений, внешности, характера, важные события и недавние события. Опирается на "
               "память диалога (в Settings «Размер истории» больше 0). Предел размера (в Settings) — "
               "дальше память не растёт. Текст можно править руками (заголовки «### ...» разделов "
               "лучше сохранять). «Очистить» и промпт применятся после «Сохранить».",
         "en": "The character remembers what matters between dialogues (companions only, not the hero). "
+              "Off — the memory is not used; Read — it goes into the character's prompt but is not "
+              "updated (try a scene without polluting the memory); Update — it is read and updated. "
               "The app updates it during the dialogue, keeping five sections: relationship, "
               "appearance and personality changes, key events and recent events. Relies on the "
               "dialogue memory (Settings “History size” above 0). The size limit (in Settings) — "
@@ -706,6 +774,7 @@ _UI = {
 _BLOCK_TITLE_EN = {
     "protagonist": "Protagonist (You)",
     "character": "Character",
+    "character2": "Second character",
     "environment": "Location",
     "scenario": "Scenario",
     "system_config": "Configuration prompt",
@@ -924,8 +993,10 @@ def block_title(block: str) -> str:
 def field_label(block: str, attr: str) -> str:
     from blocks import BLOCK_SPECS
     if _lang == "en":
-        if (block, attr) in _FIELD_LABEL_EN:
-            return _FIELD_LABEL_EN[(block, attr)]
+        # «второй персонаж» - те же поля и подписи, что у «персонажа»
+        key = ("character" if block == "character2" else block, attr)
+        if key in _FIELD_LABEL_EN:
+            return _FIELD_LABEL_EN[key]
     for a, label, _w in BLOCK_SPECS[block]["fields"]:
         if a == attr:
             return label

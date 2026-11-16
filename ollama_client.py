@@ -180,11 +180,11 @@ def normalize_messages(messages: list) -> list:
     return out
 
 
-_PARTIAL_FIELD = re.compile(r'"(action|speech)"\s*:\s*"((?:[^"\\]|\\.)*)', re.S)
+_PARTIAL_FIELD = re.compile(r'"(action|speech|to)"\s*:\s*"((?:[^"\\]|\\.)*)', re.S)
 
 
 def _partial_json_fields(text: str):
-    """Достать поля action/speech из ОБОРВАННОГО JSON-объекта (стрим упал на
+    """Достать поля action/speech (и to - адресат в режиме «Группа») из ОБОРВАННОГО JSON-объекта (стрим упал на
     полуслове, ответ обрезан по num_predict): `{"action": "a", "speech": "Приве`
     -> {"action": "a", "speech": "Приве"}. None - это не похоже на JSON-объект
     или полей не нашлось."""

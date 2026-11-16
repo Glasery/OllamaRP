@@ -16,3 +16,5 @@ dist/
 *.corrupt-*
 .DS_Store
 Thumbs.db
+
+tools/*.png
